@@ -48,3 +48,25 @@ Roadmap
 - Chainspec tooling for custom validator/session keys at genesis.
 - Parachain utilities and Proof Hub integration.
 - Documentation updates here as features land.
+
+
+# Nulla Relay: Runtime Sources (code only)
+
+This archive contains the source code for the `nulla-relay` runtime (Relay Chain). It does not include any executables/binaries.
+
+Uploaded to GitHub:
+- CLI code (sources only)
+- Runtime code (sources only)
+
+Important:
+- These components are NOT meant to be run as-is from the repository. To run a node you must build the full executable (release build) and run the produced binary.
+- We will separately publish the official executable (binary) for operators who prefer not to compile locally.
+
+What’s inside this archive
+-  relay runtime sources (Cargo.toml, src/,  etc.)
+
+Release notes
+- The sources are shared for transparency and review. Production usage should rely on officially published binaries.
+
+Support
+For questions or issues, please open an issue in the GitHub repository where the CLI and Runtime sources are hosted.
