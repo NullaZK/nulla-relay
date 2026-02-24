@@ -26,7 +26,7 @@ Notes
 Basic run (local RPC only; adjust `--name` and ports)
 ```bash
 /nulla-relay \
-  --chain chainspec.json \
+  --chain nulla.raw.json \
   --base-path /var/lib/nulla-relay \
   --validator \
   --name "YOUR_VALIDATOR_NAME" \
@@ -52,7 +52,7 @@ StartLimitIntervalSec=0
 
 [Service]
 ExecStart=/nulla-relay \
-  --chain chainspec.json \
+  --chain nulla.raw.json \
   --base-path /var/lib/nulla-relay \
   --validator \
   --name "YOUR_VALIDATOR_NAME" \
@@ -106,7 +106,7 @@ Purge the chain data (irreversible; re-sync required)
 ```bash
 /nulla-relay purge-chain \
   --base-path /var/lib/nulla-relay \
-  --chain chainspec.json \
+  --chain nulla.raw.json \
   -y
 ```
 
