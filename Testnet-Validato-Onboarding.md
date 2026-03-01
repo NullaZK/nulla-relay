@@ -90,7 +90,7 @@ No one is excluded from participation.
 ## Stay Connected
 
 - GitHub: <https://github.com/NullaZK>
-- Telegram: <https://t.me/nulla_network>
-- Twitter/X: <https://twitter.com/nulla_network>
+- Telegram: <https://t.me/nullaportal>
+- Twitter/X: <https://x.com/NullaNetwork>
 
 Questions or issues? Reach out on Telegram — the team monitors it daily throughout the testnet phase.
