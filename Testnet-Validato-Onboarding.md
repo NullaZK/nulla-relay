@@ -18,12 +18,12 @@ You need two things set up in advance:
 
 **1. A running validator node connected to the Nulla network**
 
-Follow the full setup guide here → [Validator Run Guide](./validator-run.md)
+Follow the full setup guide here → [Validator Run Guide](https://github.com/NullaZK/nulla-relay/blob/main/tutorials/validator-run.md)
 Make note of your server's public IP address — you will need it during registration.
 
 **2. The Nulla Wallet extension installed with an account created**
 
-Follow the installation guide here → [Extension Setup Guide](#) *(link to your GitHub tutorial)*
+Follow the installation guide here → [Extension Setup Guide](https://github.com/NullaZK/NULLA-extension/blob/main/INSTALL.md) 
 
 ---
 
