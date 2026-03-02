@@ -31,6 +31,7 @@ Basic run (local RPC only; adjust `--name` and ports)
   --validator \
   --name "YOUR_VALIDATOR_NAME" \
   --port <P2P PORT> \
+  --bootnodes '/ip4/89.238.185.9/tcp/30333/p2p/12D3KooWAnzXfXbVG3aYQyxarEeavLHb1MuybzfpaZsLSWUhSH1m' \
   --rpc-port <RPC PORT> --rpc-external false \
 ```
 
@@ -57,6 +58,7 @@ ExecStart=/nulla-relay \
   --validator \
   --name "YOUR_VALIDATOR_NAME" \
   --port <P2P PORT> \
+  --bootnodes '/ip4/89.238.185.9/tcp/30333/p2p/12D3KooWAnzXfXbVG3aYQyxarEeavLHb1MuybzfpaZsLSWUhSH1m' \
   --rpc-port <RPC PORT> --rpc-external false \
 Restart=always
 RestartSec=10
