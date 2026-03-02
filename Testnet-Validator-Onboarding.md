@@ -35,9 +35,9 @@ When the portal opens, visit the Nulla Faucet Dashboard and complete the form:
 |---|---|
 | **Wallet Address** | Connect your Nulla Wallet — your address will autofill |
 | **Email** | Used only for distribution notifications |
-| **Node IP** | The public IP address of your running validator node |
+| **Peer Id** | The public Peer Id of your running validator node that is shown at start of the validator |
 
-Upon submission, our system verifies that a Nulla node is live and connected at the IP address you provide. This helps prevent spam — each unique IP address and wallet can only register once.
+Upon submission, our system verifies that a Nulla node is live and connected at the IP address you provide. This helps prevent spam — each unique PeerId and wallet can only register once.
 
 Your data is used solely for token distribution purposes.
 
