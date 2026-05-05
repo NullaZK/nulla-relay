@@ -1,6 +1,6 @@
 [package]
-name = "pallet-proofs"
-version = "0.1.0"
+name = "pallet-proofhub-proofs"
+version = "1.0.0"
 edition = "2021"
 description = "Minimal proofs pallet for Proof Hub: store commitments, submit and verify proofs."
 license = "Unlicense"

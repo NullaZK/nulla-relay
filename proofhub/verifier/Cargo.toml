@@ -8,14 +8,29 @@ name = "verifier"
 crate-type = ["rlib"]
 
 [dependencies]
-sha2 = { version = "0.10", default-features = false }
-curve25519-dalek = { version = "4", default-features = false, features = ["alloc"] }
-merlin = { version = "3", default-features = false }
 blake2 = { version = "0.10", default-features = false }
+blake3 = { version = "1.5", default-features = false }
 parity-scale-codec = { version = "3.7.4", default-features = false, features = ["derive"] }
-bulletproofs = { version = "4", default-features = false }
-curve25519-dalek-ng = { version = "4", default-features = false, features = ["alloc"] }
-rand_core = { version = "0.6", default-features = false }
+fips204 = { version = "0.4", default-features = false, features = ["ml-dsa-44"] }
+winter-verifier = { version = "0.13", default-features = false }
+hex = { version = "0.4", optional = true }
+winterfell = { version = "0.13", optional = true }
+
+[dev-dependencies]
+hex = "0.4"
+fips204 = { version = "0.4", features = ["ml-dsa-44"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+winterfell = { version = "0.13" }
+
+[[bin]]
+name = "gen_stark_proof"
+path = "src/bin/gen_stark_proof.rs"
+required-features = ["std"]
+
+[[bin]]
+name = "gen_commitment"
+path = "src/bin/gen_commitment.rs"
+required-features = ["std"]
 
 [features]
-std = []
+std = ["hex", "winterfell"]

@@ -1,7 +1,7 @@
 [package]
-name = "parachain-template-runtime"
-description = "A parachain runtime template built with Substrate and Cumulus, part of Polkadot Sdk."
-version = "0.0.0"
+name = "proofhub-runtime"
+description = "ProofHub parachain runtime: privacy-preserving proof verification with Pedersen commitments and Merkle trees."
+version = "1.0.0"
 license = "Unlicense"
 authors.workspace = true
 homepage.workspace = true
@@ -26,8 +26,8 @@ smallvec = { workspace = true, default-features = true }
 
 # Local
 pallet-parachain-template = { workspace = true }
-pallet-proofs = { path = "../pallets/proofs", default-features = false }
-verifier = { path = "../verifier", default-features = false }
+pallet-proofs = { package = "pallet-proofhub-proofs", path = "../pallets/proofs", default-features = false }
+verifier = { package = "proofhub-verifier", path = "../verifier", default-features = false }
 
 polkadot-sdk = { workspace = true, default-features = false, features = [
 	"pallet-aura",

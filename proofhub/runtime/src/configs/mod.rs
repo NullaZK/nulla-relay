@@ -342,7 +342,7 @@ impl pallet_collator_selection::Config for Runtime {
 	type WeightInfo = ();
 }
 
-/// Configure the pallet template in pallets/template.
+/// Configure the ProofHub template pallet.
 impl pallet_parachain_template::Config for Runtime {
 	type RuntimeEvent = RuntimeEvent;
 	type WeightInfo = pallet_parachain_template::weights::SubstrateWeight<Runtime>;
@@ -353,32 +353,19 @@ impl pallet_proofs::Config for Runtime {
 	type RuntimeEvent = RuntimeEvent;
 	type ProofVerifier = RuntimeProofVerifier;
 	type Currency = Balances;
-	type BaseFee = PrivateBaseFee;
-	type FeePayer = PaymasterFeePayer;
-	type FindAuthor = pallet_session::FindAccountFromAuthorIndex<Self, Aura>;
-	type MaxProofSize = sp_core::ConstU32<{ 64 * 1024 }>;
-	type MaxRangeProofSize = sp_core::ConstU32<{ 16 * 1024 }>;
-	type MaxOutputs = sp_core::ConstU32<2>;
-	type GenesisCommitments = GenesisCommitments;
+	// REMOVED: GenesisCommitments - faucet logic deprecated
 	type PoolAccount = PrivacyPoolAccount;
+	type RwaDispatch = RwaXcmDispatch;
 }
 
 // Runtime proof verifier wired to the local `verifier` crate.
 pub struct RuntimeProofVerifier;
 impl pallet_proofs::ProofVerify for RuntimeProofVerifier {
-	fn verify(proof: &[u8], public_inputs: &[u8]) -> bool {
-		verifier::verify_bytes(proof, public_inputs)
-	}
 	fn pedersen_check_u64(value: u64, blinding: [u8; 32], commitment: [u8; 32]) -> bool {
 		verifier::pedersen_check_u64(value, blinding, commitment)
 	}
-	fn verify_range_proof(
-		range_proof: &[u8],
-		commitments: &[[u8; 32]],
-		public_inputs: &[u8],
-		nbits: u32,
-	) -> bool {
-		verifier::verify_range_proof(range_proof, commitments, public_inputs, nbits)
+	fn verify_purchase(proof: &[u8], public_inputs: &[u8]) -> bool {
+		verifier::verify_purchase(proof, public_inputs)
 	}
 }
 
@@ -386,7 +373,7 @@ parameter_types! {
 	pub const PrivateBaseFee: Balance = MICRO_UNIT;
 	pub const PaymasterPalletId: PalletId = PalletId(*b"nll/pay0");
 	pub const PoolPalletId: PalletId = PalletId(*b"nll/pool");
-	pub GenesisCommitments: &'static [[u8; 32]] = &[];
+	// REMOVED: GenesisCommitments - faucet logic deprecated
 }
 
 pub struct PaymasterFeePayer;
@@ -397,4 +384,72 @@ impl frame_support::traits::Get<AccountId> for PaymasterFeePayer {
 pub struct PrivacyPoolAccount;
 impl frame_support::traits::Get<AccountId> for PrivacyPoolAccount {
 	fn get() -> AccountId { PoolPalletId::get().into_account_truncating() }
+}
+
+/// XCM dispatcher: sends a `Transact` to the RWA parachain (para 2001) so that
+/// `pallet_rwa_marketplace::xcm_record_purchase` is executed there.
+///
+/// The origin arriving at the RWA chain is the ProofHub sovereign account
+/// (`SiblingParachainConvertsVia<Sibling, AccountId>` on para 2001).
+///
+/// If the HRMP channel is not open, `XcmRouter::deliver` returns an error
+/// which we log at DEBUG and swallow — `purchase_rwa` itself must not fail.
+pub struct RwaXcmDispatch;
+impl pallet_proofs::RwaPurchaseDispatch for RwaXcmDispatch {
+	fn send(
+		rwa_id: [u8; 32],
+		destination: alloc::vec::Vec<u8>,
+		nullifier: [u8; 32],
+		spend_tag: [u8; 32],
+		_note_value: u64,
+		tx_id: [u8; 16],
+		ownership_commitment: [u8; 32],
+	) {
+		use codec::Encode;
+		use xcm::latest::prelude::*;
+
+		// asset_id: first 4 bytes of rwa_id (LE u32).
+		let asset_id = u32::from_le_bytes([rwa_id[0], rwa_id[1], rwa_id[2], rwa_id[3]]);
+
+		// buyer: 32-byte AccountId from destination (zero-padded if shorter).
+		let mut buyer = [0u8; 32];
+		let len = destination.len().min(32);
+		buyer[..len].copy_from_slice(&destination[..len]);
+
+		// Encode call: [pallet_index=51][call_index=4][args SCALE]
+		// Matches RWA runtime: pallet_index(51) = RwaMarketplace, call_index(4) = xcm_record_purchase
+		// Phase 6: 3rd arg is now spend_tag (was commitment) — same [u8;32] type, same encoding
+		let mut call_data = alloc::vec::Vec::new();
+		call_data.push(51u8); // RwaMarketplace pallet index
+		call_data.push(4u8);  // xcm_record_purchase call index
+		asset_id.encode_to(&mut call_data);
+		buyer.encode_to(&mut call_data);
+		spend_tag.encode_to(&mut call_data);
+		nullifier.encode_to(&mut call_data);
+		tx_id.encode_to(&mut call_data);
+		ownership_commitment.encode_to(&mut call_data);
+
+		let dest: Location = Location::new(1, Junctions::from([Junction::Parachain(2001)]));
+		let xcm_msg: xcm::latest::Xcm<()> = Xcm::<()>(alloc::vec![
+			Instruction::<()>::UnpaidExecution { weight_limit: WeightLimit::Unlimited, check_origin: None },
+			Instruction::<()>::Transact {
+				origin_kind: OriginKind::SovereignAccount,
+				fallback_max_weight: Some(Weight::from_parts(500_000_000, 64 * 1024)),
+				call: call_data.into(),
+			},
+		]);
+
+		let mut dest_opt = Some(dest);
+		let mut msg_opt = Some(xcm_msg);
+		match xcm_config::XcmRouter::validate(&mut dest_opt, &mut msg_opt) {
+			Ok((ticket, _)) => {
+				if let Err(e) = xcm_config::XcmRouter::deliver(ticket) {
+					log::debug!(target: "proofhub::xcm", "RWA purchase XCM deliver failed: {:?}", e);
+				}
+			}
+			Err(e) => {
+				log::debug!(target: "proofhub::xcm", "RWA purchase XCM validate failed: {:?}", e);
+			}
+		}
+	}
 }

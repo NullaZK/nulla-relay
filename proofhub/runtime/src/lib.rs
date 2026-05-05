@@ -161,10 +161,10 @@ impl_opaque_keys! {
 
 #[sp_version::runtime_version]
 pub const VERSION: RuntimeVersion = RuntimeVersion {
-	spec_name: alloc::borrow::Cow::Borrowed("parachain-template-runtime"),
-	impl_name: alloc::borrow::Cow::Borrowed("parachain-template-runtime"),
+	spec_name: alloc::borrow::Cow::Borrowed("proofhub-runtime"),
+	impl_name: alloc::borrow::Cow::Borrowed("proofhub-runtime"),
 	authoring_version: 1,
-	spec_version: 1,
+	spec_version: 109,
 	impl_version: 0,
 	apis: apis::RUNTIME_API_VERSIONS,
 	transaction_version: 1,
@@ -305,9 +305,9 @@ mod runtime {
 	#[runtime::pallet_index(33)]
 	pub type MessageQueue = pallet_message_queue;
 
-	// Template
+	// ProofHub
 	#[runtime::pallet_index(50)]
-	pub type TemplatePallet = pallet_parachain_template;
+	pub type ProofHubPallet = pallet_parachain_template;
 
 	// Proof Hub: proofs pallet
 	#[runtime::pallet_index(51)]
