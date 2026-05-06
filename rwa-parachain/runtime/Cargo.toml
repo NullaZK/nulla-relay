@@ -1,0 +1,100 @@
+[package]
+name = "rwa-runtime"
+version = "1.0.0"
+authors.workspace = true
+edition.workspace = true
+homepage.workspace = true
+repository.workspace = true
+license = "Unlicense"
+publish = false
+description = "RWA Appchain runtime: tokenisation of real-world assets with ProofHub privacy."
+
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
+
+[lints]
+workspace = true
+
+[dependencies]
+codec      = { workspace = true, default-features = false, features = ["derive"] }
+docify     = { workspace = true }
+hex-literal = { workspace = true, optional = true, default-features = true }
+log        = { workspace = true }
+scale-info = { workspace = true, default-features = false, features = ["derive"] }
+serde_json = { workspace = true, default-features = false, features = ["alloc"] }
+smallvec   = { workspace = true, default-features = true }
+
+# RWA pallets
+pallet-rwa-registry    = { path = "../pallets/rwa-registry", default-features = false }
+pallet-rwa-marketplace = { path = "../pallets/rwa-marketplace", default-features = false }
+pallet-rwa-vault       = { path = "../pallets/rwa-vault", default-features = false }
+
+polkadot-sdk = { workspace = true, default-features = false, features = [
+    "pallet-aura",
+    "pallet-authorship",
+    "pallet-balances",
+    "pallet-message-queue",
+    "pallet-session",
+    "pallet-sudo",
+    "pallet-timestamp",
+    "pallet-transaction-payment",
+    "pallet-transaction-payment-rpc-runtime-api",
+
+    "pallet-xcm",
+    "polkadot-parachain-primitives",
+    "polkadot-runtime-common",
+    "staging-xcm",
+    "staging-xcm-builder",
+    "staging-xcm-executor",
+
+    "cumulus-pallet-aura-ext",
+    "cumulus-pallet-session-benchmarking",
+    "cumulus-pallet-weight-reclaim",
+    "cumulus-pallet-xcm",
+    "cumulus-pallet-xcmp-queue",
+    "cumulus-primitives-aura",
+    "cumulus-primitives-core",
+    "cumulus-primitives-utility",
+    "pallet-collator-selection",
+    "parachains-common",
+    "staging-parachain-info",
+
+    "runtime",
+] }
+
+# Cumulus
+cumulus-pallet-parachain-system = { workspace = true }
+
+[build-dependencies]
+docify = { workspace = true }
+substrate-wasm-builder = { optional = true, workspace = true, default-features = true }
+
+[features]
+default = ["std"]
+std = [
+    "codec/std",
+    "cumulus-pallet-parachain-system/std",
+    "log/std",
+    "pallet-rwa-marketplace/std",
+    "pallet-rwa-registry/std",
+    "pallet-rwa-vault/std",
+    "polkadot-sdk/std",
+    "scale-info/std",
+    "serde_json/std",
+    "substrate-wasm-builder",
+]
+runtime-benchmarks = [
+    "cumulus-pallet-parachain-system/runtime-benchmarks",
+    "pallet-rwa-marketplace/runtime-benchmarks",
+    "pallet-rwa-registry/runtime-benchmarks",
+    "pallet-rwa-vault/runtime-benchmarks",
+    "polkadot-sdk/runtime-benchmarks",
+]
+try-runtime = [
+    "cumulus-pallet-parachain-system/try-runtime",
+    "pallet-rwa-marketplace/try-runtime",
+    "pallet-rwa-registry/try-runtime",
+    "pallet-rwa-vault/try-runtime",
+    "polkadot-sdk/try-runtime",
+]
+metadata-hash = ["substrate-wasm-builder/metadata-hash"]

@@ -1,0 +1,55 @@
+[package]
+name = "pallet-rwa-marketplace"
+version = "1.0.0"
+authors.workspace = true
+edition.workspace = true
+homepage.workspace = true
+repository.workspace = true
+license = "Unlicense"
+publish = false
+description = "RWA Marketplace pallet: private sale and redemption of real-world asset notes."
+
+[lints]
+workspace = true
+
+[dependencies]
+codec        = { workspace = true, default-features = false, features = ["derive", "max-encoded-len"] }
+scale-info   = { workspace = true, default-features = false, features = ["derive"] }
+log          = { workspace = true, default-features = false }
+frame-support = { workspace = true, default-features = false }
+frame-system  = { workspace = true, default-features = false }
+sp-runtime   = { workspace = true, default-features = false }
+sp-std       = { workspace = true, default-features = false }
+
+pallet-rwa-registry = { path = "../rwa-registry", default-features = false }
+blake3 = { workspace = true, default-features = false }
+
+[dev-dependencies]
+sp-io               = { workspace = true, default-features = true }
+sp-core             = { workspace = true, default-features = true }
+pallet-balances     = { workspace = true, default-features = true }
+pallet-rwa-registry = { path = "../rwa-registry", default-features = true }
+
+[features]
+default = ["std"]
+std = [
+    "codec/std",
+    "blake3/std",
+    "frame-support/std",
+    "frame-system/std",
+    "log/std",
+    "pallet-rwa-registry/std",
+    "scale-info/std",
+    "sp-runtime/std",
+    "sp-std/std",
+]
+runtime-benchmarks = [
+    "frame-support/runtime-benchmarks",
+    "frame-system/runtime-benchmarks",
+    "pallet-rwa-registry/runtime-benchmarks",
+]
+try-runtime = [
+    "frame-support/try-runtime",
+    "frame-system/try-runtime",
+    "pallet-rwa-registry/try-runtime",
+]
