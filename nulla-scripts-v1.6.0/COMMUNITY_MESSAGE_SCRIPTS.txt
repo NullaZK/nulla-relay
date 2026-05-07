@@ -1,0 +1,45 @@
+Nulla Protocol -- Deployment and Operations Scripts 
+=======================================================================
+
+WHAT WE SHIPPED
+---------------
+The operational tooling used to deploy and verify the runtime upgrades
+on the Nulla testnet. These scripts were run live to upgrade both chains and
+are the same tools an operator would use to run their own Nulla node.
+
+SCRIPTS
+-------
+1. upgrade_proofhub_runtime.js
+   Forkless runtime upgrade for the ProofHub parachain.
+   Submits sudo.sudo(system.setCode) with the compiled WASM.
+   Verifies spec_version == 109 after upgrade.
+   Confirms purchaseRwa extrinsic is present in the new runtime.
+   Used live to deploy Phase 6 (spend_tag unlinkability).
+
+2. upgrade_rwa_runtime.js
+   Forkless runtime upgrade for the RWA parachain.
+   Verifies spec_version == 102 after upgrade.
+   Bug fix included: version check was previously inverted (returned false
+   SUCCESS when spec was still 101). Fixed in this release.
+
+3. audit_chain_state.js
+   Full consistency audit across both chains simultaneously.
+   Reads from ProofHub: SpendTagValues, SpendTagUsed, NullifierUsed,
+   CommitmentAmounts, Leaves, MerkleRoot.
+   Reads from RWA chain: ProofHubPurchases, OwnershipRedeemed, Listings.
+   Performs 5 cross-chain consistency checks:
+     All used spend_tags must have registered values.
+     NullifierUsed >= SpendTagUsed (no phantom purchases).
+     Merkle leaves == CommitmentAmounts (tree integrity).
+     RWA purchases <= ProofHub nullifiers (cross-chain).
+     Ownership redeemed <= purchases.
+
+4. register_para.js
+   Registers a parachain on the relay chain via parasSudoWrapper.
+   Parametric -- takes relay RPC, para ID, genesis head, and WASM as args.
+   Used to register ProofHub (para 2000) and RWA chain (para 2001).
+
+TESTED AGAINST
+--------------
+  ProofHub spec_version: 109
+  RWA runtime spec_version: 102
