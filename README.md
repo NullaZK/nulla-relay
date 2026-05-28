@@ -1,158 +1,123 @@
-# Nulla Relay CLI (First Upload)
+# Nulla — Relay Chain & Privacy Parachains
 
-This is the first public upload of the Nulla relay CLI (`nulla-relay`). It provides a branded command-line interface for running a local Nulla relay node, exporting chainspecs, and basic node operations.
+Nulla is a Substrate-based privacy network for real-world assets, DeSci, AI agents, and autonomous economies. It runs two parallel privacy lanes — **ProofHub** (Quantum Lane) and **ScanProof** (Homomorphic Lane) — both settling private ownership commitments on the same **RWA Appchain**.
 
-Status
-- Initial drop of the CLI only; additional components (service wrappers, packaging, parachain tooling) will follow.
-- Builds inside the Polkadot SDK workspace and reuses the existing node service and Nulla runtime.
-- Future updates will expand features and this README will be updated accordingly.
+Neither lane is primary. They are peer implementations with independent cryptographic stacks, lane-local note domains, and the same settlement endpoint.
 
-Requirements
-- Rust toolchain (stable)
-- This repository checked out with workspace dependencies (Polkadot SDK, Substrate)
+---
 
-Build
-```bash
-# From workspace root
-cargo build -p nulla-cli --release
+## Architecture Overview
 
-# Verify
-./target/release/nulla-relay --help
+```
++-------------------------+    +-------------------------+
+|   ProofHub              |    |   ScanProof             |
+|   Quantum Lane          |    |   Homomorphic Lane      |
+|   BLAKE3 + ML-DSA-44    |    |   Pedersen + Schnorr    |
+|                         |    |   + Bulletproofs        |
+|   Lane-local notes      |    |   Lane-local notes      |
+|   Lane-local nullifiers |    |   Lane-local nullifiers |
++------------+------------+    +------------+------------+
+             |   XCM reserve-transfer        |
+             +--------------+----------------+
+                            v
+             +------------------------------+
+             |   RWA Appchain               |
+             |   ownership_commitment       |
+             |   settlement (para 2001)     |
+             +------------------------------+
 ```
 
-Quick Start
-- Export readable chainspec (defaults to `nulla-local`):
-```bash
-./target/release/nulla-relay build-spec --chain nulla-local > chainspec/nulla.json
+Users choose a lane at entry. Notes, Merkle trees, and nullifier sets are lane-local and not shared across lanes. Both lanes forward valid purchase authorizations to the RWA Appchain via XCM reserve-transfer.
+
+---
+
+## ProofHub — Quantum Lane
+
+ProofHub is the Quantum Lane parachain. It uses hash-based and lattice-based primitives, making it resistant to quantum adversaries.
+
+### Cryptographic Primitives
+
+- **BLAKE3** — commitment scheme, spend-tag derivation, purchase message hashing
+- **ML-DSA-44 (FIPS 204)** — spend-tag binding and purchase authorization signatures
+- Lane-local BLAKE3 Merkle tree and nullifier set
+
+### Commitment Scheme
+
 ```
-- Export raw chainspec:
-```bash
-./target/release/nulla-relay build-spec --chain nulla-local --raw > chainspec/nulla-testnet.json
-```
-- Run a single local validator (force authoring):
-```bash
-./target/release/nulla-relay \
-  --chain nulla-local \
-  --base-path /tmp/nulla-you \
-  --validator \
-  --force-authoring
+C = BLAKE3("nulla_commitment_v1" || value_le64 || blinding_32)
+spend_tag = BLAKE3("nulla_spend_tag_v1" || C || recipient_pk)
 ```
 
-Notes
-- This CLI is currently tied to the workspace node service/runtime and is not a standalone publishable crate yet.
-- Protocol ID is `nulla`; properties include token symbol `NULLA`, decimals `12`, ss58 `42`.
-- Base transaction fees are reduced for local/testnet usage; validator rewards include tips and inflation with a treasury share.
+### Capabilities
 
-Roadmap
-- Publish/reusable service layer (or pin SDK git dependencies for standalone builds).
-- Chainspec tooling for custom validator/session keys at genesis.
-- Parachain utilities and Proof Hub integration.
-- Documentation updates here as features land.
+- `deposit_private` — creates a lane-local BLAKE3 note
+- `purchase_rwa` — verifies spend-tag and ML-DSA-44 signature, authorizes RWA purchase
+- `relist_private` — re-enters a commitment into the note pool after relisting
+- `withdraw_private` — burns note, withdraws to public balance
+- `redeem_rwa_ownership` — redeems ownership commitment on the RWA Appchain
 
+### XCM Settlement Flow
 
-# Nulla Relay: Runtime Sources (code only)
+1. ProofHub verifies lane-local proof (spend-tag, ML-DSA-44, nullifier, Merkle path).
+2. Emits XCM reserve-transfer to RWA Appchain (para 2001) with `ownership_commitment` update.
+3. RWA Appchain anchors the new ownership state.
 
-This archive contains the source code for the `nulla-relay` runtime (Relay Chain). It does not include any executables/binaries.
+---
 
-Uploaded to GitHub:
-- CLI code (sources only)
-- Runtime code (sources only)
+## ScanProof — Homomorphic Lane
 
-Important:
-- These components are NOT meant to be run as-is from the repository. To run a node you must build the full executable (release build) and run the produced binary.
-- We will separately publish the official executable (binary) for operators who prefer not to compile locally.
+ScanProof (`scanproof-runtime`) is the Homomorphic Lane parachain (para ID 2002, RPC port 9957). It uses additive homomorphic commitments over Ristretto255, enabling private value composition without revealing amounts.
 
-What’s inside this archive
--  relay runtime sources (Cargo.toml, src/,  etc.)
+**Status:** public testnet. Deployed on Nulla relay. Production release pending collator onboarding.
 
-Release notes
-- The sources are shared for transparency and review. Production usage should rely on officially published binaries.
+### Cryptographic Primitives
 
-Support
-For questions or issues, please open an issue in the GitHub repository where the CLI and Runtime sources are hosted.
+- **Pedersen commitments (Ristretto255)** — `C = value*G + blinding*H`; additive: `C(a) + C(b) = C(a+b)`
+- **Schnorr balance proof** — checks `s*H = R + c*agg` via Merlin transcript; aggregates `inputs - outputs - fee`
+- **Bulletproof range proofs** — verifies outputs + fee are in range; deterministic transcript binding
+- **Blake2b-256 Merkle tree** — lane-local commitment anchoring
+- Lane-local nullifier sets (`NullifierUsed`, `FeeNullifierUsed`)
 
-# ProofHub Parachain Overview
+### Components
 
-This document describes the ProofHub components, capabilities
+- **Pallet** (`pallets/proofs/src/lib.rs`) — on-chain privacy logic: unsigned proof submission, deposits, fee pool, Merkle anchoring
+- **Verifier** (`verifier/src/lib.rs`) — `no_std` cryptographic verification: Schnorr balance, Bulletproofs range, Pedersen checks
+- **Runtime wiring** (`runtime/src/configs/mod.rs`) — constants, accounts, limits, pallet configuration
 
-## Components
+### Extrinsics (API)
 
-- Pallet: on-chain privacy logic (unsigned proof submission, deposits, fee pool, Merkle anchoring)
-  - Path: pallets/proofs/src/lib.rs
-- Verifier: no_std cryptographic verification (Schnorr balance, Bulletproofs range, Pedersen checks)
-  - Path: verifier/src/lib.rs
-- Runtime wiring: constants, accounts, limits, and pallet configuration
-  - Path: runtime/src/configs/mod.rs
+- `submit_proof(origin = none, proof, range_proof, public_inputs, hints_blob)` — unsigned privacy call; verifies range proof, Schnorr balance, membership, nullifiers; rotates roots; pays base fee to block author
+- `deposit_public(origin = signed, commitment, amount, blinding, hints_blob)` — verifies Pedersen opening; transfers to pool; appends commitment; rotates Merkle root
+- `deposit_fee(origin = signed, fee_commitment)` — transfers base fee to Paymaster; records fee credit
 
-## Capabilities
+### Public Inputs (SCALE-encoded)
 
-- Schnorr balance proof
-  - Checks s·H = R + c·agg bound via Merlin transcript.
-  - Aggregates commitments: inputs − outputs − fee.
-- Bulletproofs range proof
-  - Verifies aggregated outputs + fee with deterministic transcript binding.
-  - Deterministic padding to power-of-two party capacity.
-- Pedersen deposit check
-  - Validates commitment opening for public deposits: commitment = value*G + r*H.
-- Merkle anchoring & state
-  - Maintains CurrentRoot, RecentRoots window, Leaves, CommitmentIndex.
-  - Enforces membership via merkle path or index-gate against an anchor root.
-- Nullifiers & fee pool
-  - NullifierUsed and FeeNullifierUsed prevent double-spends.
-  - deposit_fee creates fee credits; submit_proof consumes and pays a base fee to block author.
-- Events
-  - ProofAccepted, ProofRejected, RangeProofVerified, FeeDeposited, FeePaid/FeePayoutFailed, DepositAccepted.
+- `merkle_root: [u8;32]`
+- `new_merkle_root: [u8;32]` (or zero to compute on-chain)
+- `input_commitments: Vec<[u8;32]>`
+- `input_indices: Vec<u32>`
+- `input_paths: Vec<Vec<[u8;32]>>`
+- `nullifiers: Vec<[u8;32]>`
+- `new_commitments: Vec<[u8;32]>`
+- `fee_commitment: [u8;32]`
+- `fee_nullifier: [u8;32]`
+- `tx_id: [u8;16]`
 
-## Extrinsics (API)
+### Runtime Configuration
 
-- submit_proof(origin = none, proof: Vec<u8>, range_proof: BoundedVec<u8>, public_inputs: Vec<u8>, hints_blob: BoundedVec<u8>)
-  - Privacy call (unsigned). Verifies range proof, Schnorr balance, membership, nullifiers; rotates roots; consumes fee credit and pays base fee.
-- deposit_public(origin = signed, commitment: [u8;32], amount: u128, blinding: [u8;32], hints_blob: BoundedVec<u8>)
-  - Verifies Pedersen opening; transfers funds to pool; appends commitment; recomputes and rotates Merkle root.
-- deposit_fee(origin = signed, fee_commitment: [u8;32])
-  - Transfers base fee to Paymaster account; records a fee commitment credit.
+- `RuntimeProofVerifier` delegates to the verifier crate
+- `PaymasterPalletId` — Paymaster fee account
+- `PoolPalletId` — Privacy pool account
+- `PrivateBaseFee` — fixed base fee per accepted proof; split between burn and block author
+- `GenesisCommitments` — optional faucet commitments (default empty)
+- Limits: `MaxProofSize`, `MaxRangeProofSize`, `MaxOutputs`
 
-## Public Inputs
+### XCM Settlement Flow
 
-SCALE-encoded struct passed to the verifier:
+1. ScanProof verifies lane-local proof (Schnorr balance, Bulletproof range, Merkle path, nullifiers).
+2. Emits XCM reserve-transfer to RWA Appchain (para 2001) with `ownership_commitment` update.
+3. RWA Appchain anchors the new ownership state.
 
-- merkle_root: [u8;32]
-- new_merkle_root: [u8;32] (or zero to compute on chain)
-- input_commitments: Vec<[u8;32]>
-- input_indices: Vec<u32>
-- input_paths: Vec<Vec<[u8;32]>>
-- nullifiers: Vec<[u8;32]>
-- new_commitments: Vec<[u8;32]>
-- fee_commitment: [u8;32]
-- fee_nullifier: [u8;32]
-- tx_id: [u8;16]
+---
 
-## Runtime Configuration
-
-- Verifier hook: RuntimeProofVerifier delegates to verifier crate.
-- Accounts & constants:
-  - PaymasterPalletId → Paymaster fee account
-  - PoolPalletId → Privacy pool account
-  - PrivateBaseFee → fixed base fee paid per accepted proof
-  - GenesisCommitments → optional faucet commitments (default empty)
-- Limits:
-  - MaxProofSize, MaxRangeProofSize, MaxOutputs
-- Author payout: fixed base fee split between burn and author.
-
-
-## Inter-chain Integration (XCM)
-
-Other parachains can submit proofs via XCM Transact calling submit_proof, deposit_fee, or deposit_public on ProofHub.
-
-High-level flow:
-
-1. RWA parachain constructs proof and public inputs off-chain.
-2. Sends XCM to ProofHub with a Transact call for submit_proof.
-3. ProofHub verifies, anchors new root, pays author, and emits events.
-
-## Security & Operations
-
-- Weights are placeholders; add benchmarks and replace stubs for production.
-- Provide your faucet GenesisCommitments to enable genesis note flows.
-- Consider external review/audit of cryptographic code paths before mainnet deployment.
-
+- Session keys are required for block authoring; insert via local RPC per Nulla key management docs
