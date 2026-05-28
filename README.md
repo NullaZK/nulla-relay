@@ -118,6 +118,4 @@ ScanProof (`scanproof-runtime`) is the Homomorphic Lane parachain (para ID 2002,
 2. Emits XCM reserve-transfer to RWA Appchain (para 2001) with `ownership_commitment` update.
 3. RWA Appchain anchors the new ownership state.
 
----
 
-- Session keys are required for block authoring; insert via local RPC per Nulla key management docs
