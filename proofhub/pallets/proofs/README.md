@@ -1,25 +1,49 @@
-# pallet-proofs (ProofHub MVP)
+# pallet-proofhub-proofs (ProofHub — quantum lane, Phase 9)
 
-Minimal pallet to:
-- Store a `commitment: H256` plus opaque `payload: Vec<u8>` per submission
-- Emit `ProofSubmitted` and allow marking/merkle-checking as verified
+Quantum-resistant private lane for the Nulla Network.
+Built on STARK membership proofs (winterfell 0.13) + ML-DSA-44 signatures (FIPS 204) + BLAKE3 note hashing.
 
-What it does NOT do (by design in this MVP):
-- On-chain cryptographic verification of Pedersen commitments or homomorphic proofs
-- Bulletproofs/zk verification inside the runtime (too heavy for WASM and gasless)
+## What it does on-chain
 
-Recommended usage for now:
-- Verify proofs off-chain, then call `verify_proof(commitment)` or `verify_merkle_proof(...)` to attest on-chain
-- Use `payload` to carry proof bytes or a reference (hash/URI); the pallet treats it opaquely
+The pallet performs **real cryptographic verification inside the runtime**:
 
-API
-- `submit_proof(origin, commitment: H256, payload: Vec<u8>)`
-- `verify_proof(origin, commitment: H256)` (placeholder: flips `verified = true`)
-- `verify_merkle_proof(origin, commitment: H256, leaf: Vec<u8>, siblings: Vec<H256>, dirs: Vec<bool>)`
+- STARK verifier (`DepositV2Air`, `WithdrawV2Air`, `PurchaseRwaV2Air`) for proof of membership in the note Merkle tree
+- ML-DSA-44 signature check (post-quantum) on the spending key
+- BLAKE3 leaf hash: `NoteHash(amount, blinding, pkd)`
+- Nullifier set to prevent double-spend
+- Public balance ↔ pool transitions through XCM
 
-Roadmap (if on-chain Pedersen is required):
-- Add a compact commitment type (compressed group element bytes)
-- Provide light-weight relations (e.g., sum of commitments) if feasible
-- Keep heavy crypto (zk/SNARK/Bulletproof) verification off-chain or via a dedicated verifier chain/precompile
+## Extrinsics (Phase 9 — spec_version 127)
 
-See wiring in the template runtime at `Proofs = pallet_proofs` and configuration in `runtime/src/configs/mod.rs`.
+Phase 9 introduced **v2 zk-membership** dispatchables; the v1 legacy ones are kept for ABI
+compatibility but **rejected at runtime** (`legacy deposits disabled`).
+
+### Active (v2)
+
+| Call | Origin | Purpose |
+|---|---|---|
+| `deposit_v2(leaf, amount, deposit_proof, hints_blob)` | signed | Public NULLA → private note (STARK `DepositV2Air`) |
+| `withdraw_v2(auth, public_inputs, spend_proof)` | none (unsigned) | Private note → public NULLA. `public_inputs = WithdrawPublicV2 { merkle_root, nullifier, amount, destination: [u8; 32], tx_id }` |
+| `purchase_rwa_v2(auth, public_inputs, spend_proof)` | none (unsigned) | Private purchase of an RWA listing. `public_inputs = SpendPublicV2 { ... }` |
+| `purchase_access_v2(...)` | none (unsigned) | Private paywall purchase backed by a v2 spend proof |
+
+`auth` is the ML-DSA-44 signature blob, `spend_proof` is the serialized STARK proof.
+
+### Legacy (v1 — disabled in Phase 9)
+
+`deposit_public`, `purchase_rwa`, `withdraw_private`, `purchase_access`
+— kept in the Call enum for storage migrations, return `LegacyDisabled` at runtime.
+
+### Marketplace / admin
+
+`relist_private`, `set_rwa_price`, `set_access_config`
+
+## Storage highlights
+
+- `Notes`, `NoteRoots`, `NullifierUsed`
+- `RwaListings`, `RwaPrice`, `AccessConfig`
+
+## Wiring
+
+`Proofs = pallet_proofhub_proofs` in `runtime/src/configs/mod.rs`.
+Verifier crate: `proofhub-verifier` (winterfell 0.13 + fips204 0.4 + blake3 1.5).

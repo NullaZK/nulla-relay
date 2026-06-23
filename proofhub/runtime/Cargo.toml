@@ -1,6 +1,6 @@
 [package]
 name = "proofhub-runtime"
-description = "ProofHub parachain runtime: privacy-preserving proof verification with Pedersen commitments and Merkle trees."
+description = "ProofHub parachain runtime (Phase 9, spec_version 127): quantum-resistant private lane using STARK membership proofs (winterfell 0.13) plus ML-DSA-44 signatures (FIPS 204) and BLAKE3-based note hashing."
 version = "1.0.0"
 license = "Unlicense"
 authors.workspace = true

@@ -39,11 +39,151 @@ pub struct RwaPurchaseInputs {
 	/// A new private note representing RWA ownership.
 	/// BLAKE3("nulla_rwa_ownership_v1" || rwa_id || blinding)
 	pub ownership_commitment: [u8; 32],
+	/// Optional change note when note_value > price.
+	/// BLAKE3("nulla_commitment_v1" || change_amount || change_blinding)
+	pub change_commitment: Option<[u8; 32]>,
+	/// Spend tag for the change note: BLAKE3("nulla_spend_tag_v1" || change_pk)
+	pub change_spend_tag: Option<[u8; 32]>,
+	/// Phase 8: ZK STARK proof — Poseidon(v, blinding) = rp_commitment AND v >= price.
+	/// v and blinding are PRIVATE (not in call data).
+	pub purchase_proof: Vec<u8>,
+}
+
+/// Public inputs for withdrawing a private note back to public balance.
+///
+/// The wallet signs these inputs with the deposit-time ML-DSA-44 private key.
+/// On-chain: BLAKE3("nulla_spend_tag_v1" || pk_from_proof) must equal spend_tag.
+/// FIRST FIELD is spend_tag so bytes 0..32 of SCALE encoding are the tag.
+#[derive(Encode, Decode, DecodeWithMemTracking, Clone, PartialEq, Eq, Debug, TypeInfo)]
+pub struct WithdrawInputs {
+	/// FIRST FIELD — SCALE encodes as bytes 0..32 (relied on by verify_withdrawal).
+	pub spend_tag: [u8; 32],
+	/// Destination AccountId on ProofHub to receive the tokens from the pool.
+	pub destination: Vec<u8>,
+	pub tx_id: [u8; 16],
+	/// Phase 7: commitment opening witness — proves SpendTagCommitments[spend_tag] opens to note_value.
+	/// note_value is revealed to validators at spend time but NOT stored in chain state or events.
+	pub note_value: u64,
+	pub note_blinding: [u8; 32],
+}
+
+/// Public inputs for a private peer-to-peer RWA ownership transfer (resell).
+///
+/// The current owner proves ownership via BLAKE3 preimage of ownership_commitment;
+/// no ML-DSA-44 signature needed — the blinding IS the proof of ownership.
+/// The new buyer's spend_tag must already be in SpendTagValues.
+#[derive(Encode, Decode, DecodeWithMemTracking, Clone, PartialEq, Eq, Debug, TypeInfo)]
+pub struct RelistInputs {
+	/// tx_id of the original purchase — used to look up ownership_commitment.
+	pub old_tx_id: [u8; 16],
+	/// rwa_id from the original purchase (needed to recompute ownership hash).
+	pub rwa_id: [u8; 32],
+	/// Blinding that proves ownership: BLAKE3(domain || rwa_id || blinding) == ownership_commitment.
+	pub ownership_blinding: [u8; 32],
+	/// New buyer's spend_tag (already in SpendTagValues — they've already deposited).
+	pub new_buyer_spend_tag: [u8; 32],
+	/// Price for this resale (checked: SpendTagValues[new_buyer_spend_tag] >= price).
+	pub price: u64,
+	/// Reseller's payment note commitment: BLAKE3("nulla_commitment_v1" || price || blinding).
+	/// Inserted into Merkle tree so reseller can withdraw or use it for another purchase.
+	pub payment_commitment: [u8; 32],
+	/// Spend tag for the reseller's payment note: BLAKE3("nulla_spend_tag_v1" || payment_pk).
+	pub payment_spend_tag: [u8; 32],
+	/// Optional change note if new_buyer_note_value > price.
+	pub change_commitment: Option<[u8; 32]>,
+	/// Spend tag for the change note.
+	pub change_spend_tag: Option<[u8; 32]>,
+	/// New ownership commitment for the new buyer:
+	/// BLAKE3("nulla_rwa_ownership_v1" || rwa_id || new_blinding)
+	pub new_ownership_commitment: [u8; 32],
+	/// Unique tx ID for this transfer (used as key in OwnershipCommitments).
+	pub new_tx_id: [u8; 16],
+	/// Phase 7: commitment opening witnesses for the new buyer's note.
+	/// buyer_value/buyer_blinding prove SpendTagCommitments[new_buyer_spend_tag] opens correctly.
+	/// Revealed to validators at spend time but NOT stored in chain state or events.
+	pub buyer_value: u64,
+	pub buyer_blinding: [u8; 32],
+	/// Blinding for the payment commitment: BLAKE3(domain || price || payment_blinding) == payment_commitment.
+	pub payment_blinding: [u8; 32],
+	/// Change output commitment opening witnesses (required when buyer_value > price).
+	pub change_value: Option<u64>,
+	pub change_blinding: Option<[u8; 32]>,
 }
 
 pub trait ProofVerify {
-	fn pedersen_check_u64(value: u64, blinding: [u8; 32], commitment: [u8; 32]) -> bool;
+	fn verify_commitment(value: u64, blinding: [u8; 32], commitment: [u8; 32]) -> bool;
 	fn verify_purchase(proof: &[u8], public_inputs: &[u8]) -> bool;
+	fn verify_withdrawal(proof: &[u8], public_inputs: &[u8]) -> bool;
+	/// Phase 8: verify STARK range proof + Poseidon commitment proof.
+	/// rp_commitment: Poseidon(v, blinding) stored on-chain from deposit call data.
+	fn verify_range_proof(range_proof: &[u8], rp_commitment: &[u8; 32]) -> bool;
+	/// Phase 8: verify PurchaseAir STARK.
+	/// Proves: Poseidon(iv, v, blinding) = rp_commitment AND v >= price
+	///     AND Poseidon(iv, v-price, c_blinding) = change_rp_commitment.
+	/// Pass change_rp_commitment = [0u8;32] only when v == price (no change note).
+	fn verify_purchase_proof(proof: &[u8], rp_commitment: &[u8; 32], change_rp_commitment: &[u8; 32], price: u64) -> bool;
+
+	// --- Phase 9 (v2 zk-membership, ZK_MEMBERSHIP_SPEC_V2.md) ---
+
+	/// Verify DepositV2Air: leaf = NoteHash(amount, b, pkd) for private (b, pkd).
+	fn verify_deposit_v2(proof: &[u8], amount: u64, leaf: &[u8; 32]) -> bool;
+	/// Verify SpendAir: Merkle membership + nullifier derivation + value conservation.
+	/// purchase_mode true: v - cv == price_or_amount; false: v == price_or_amount, cv == 0.
+	fn verify_spend_v2(
+		proof: &[u8],
+		root: &[u8; 32],
+		nullifier: &[u8; 32],
+		pkd: &[u8; 32],
+		price_or_amount: u64,
+		change_leaf: &[u8; 32],
+		change_pkd: &[u8; 32],
+		purchase_mode: bool,
+	) -> bool;
+	/// Verify ML-DSA-44 spend authorization over BLAKE3(domain ‖ public_inputs).
+	fn verify_spend_auth_v2(auth: &[u8], public_inputs: &[u8], withdraw: bool) -> bool;
+	/// Insert a leaf into the incremental v2 frontier; returns (new_nodes, new_count, new_root)
+	/// or None when the tree is full.
+	fn v2_insert_leaf(
+		nodes: [[u8; 32]; 20],
+		leaf_count: u32,
+		leaf: [u8; 32],
+	) -> Option<([[u8; 32]; 20], u32, [u8; 32])>;
+	/// Canonical zero-change leaf: NoteHash(0, [0;32], [0;32]).
+	fn v2_zero_change_leaf() -> [u8; 32];
+}
+
+/// Public inputs for a v2 zk-membership RWA purchase (Phase 9).
+///
+/// The ML-DSA-44 auth (pk ‖ sig) travels in a separate `auth` parameter and
+/// signs BLAKE3("nulla_spend_auth_v2" ‖ SCALE(self)), binding every field.
+/// pkd = BLAKE3("nulla_pk_digest_v2" ‖ pk) is recomputed on-chain and passed
+/// into the STARK as a public input, binding the signing key to the spent note.
+#[derive(Encode, Decode, DecodeWithMemTracking, Clone, PartialEq, Eq, Debug, TypeInfo)]
+pub struct SpendPublicV2 {
+	/// Must equal CurrentRootV2 or one of RecentRootsV2.
+	pub merkle_root: [u8; 32],
+	/// Poseidon nullifier derived in-circuit from the note blinding.
+	pub nullifier: [u8; 32],
+	pub rwa_id: [u8; 32],
+	pub tx_id: [u8; 16],
+	/// BLAKE3("nulla_rwa_ownership_v1" ‖ rwa_id ‖ ownership_blinding).
+	pub ownership_commitment: [u8; 32],
+	/// Change note leaf — always present (zero-value change when v == price).
+	pub change_leaf: [u8; 32],
+	/// pk digest of the change note's fresh ML-DSA keypair.
+	pub change_pkd: [u8; 32],
+}
+
+/// Public inputs for a v2 zk-membership withdrawal (Phase 9).
+#[derive(Encode, Decode, DecodeWithMemTracking, Clone, PartialEq, Eq, Debug, TypeInfo)]
+pub struct WithdrawPublicV2 {
+	pub merkle_root: [u8; 32],
+	pub nullifier: [u8; 32],
+	/// Revealed amount — the STARK enforces v == amount exactly.
+	pub amount: u64,
+	/// Destination AccountId (32 bytes) on ProofHub.
+	pub destination: [u8; 32],
+	pub tx_id: [u8; 16],
 }
 
 /// Trait implemented by the runtime to send an XCM `Transact` to the RWA
@@ -55,19 +195,58 @@ pub trait ProofVerify {
 pub trait RwaPurchaseDispatch {
 	fn send(
 		rwa_id: [u8; 32],
-		destination: Vec<u8>,
+		// NOTE: destination is intentionally excluded — it is covered by the
+		// ML-DSA-44 proof inside public_inputs but must not travel in the XCM
+		// message, as that would reveal the buyer's AccountId cross-chain.
+		// Redemption on the RWA chain is done via ownership_commitment blinding.
 		nullifier: [u8; 32],
 		spend_tag: [u8; 32],
 		note_value: u64,
 		tx_id: [u8; 16],
 		ownership_commitment: [u8; 32],
 	);
+	/// Send XCM to transfer an existing ownership record on the RWA chain.
+	/// Called by `relist_private` after verifying the reseller's ownership proof.
+	fn send_transfer(
+		old_tx_id: [u8; 16],
+		new_ownership_commitment: [u8; 32],
+		new_tx_id: [u8; 16],
+	);
 }
 
 /// No-op implementation used when XCM is not wired (e.g. tests).
 pub struct NoopRwaDispatch;
 impl RwaPurchaseDispatch for NoopRwaDispatch {
-	fn send(_: [u8; 32], _: Vec<u8>, _: [u8; 32], _: [u8; 32], _: u64, _: [u8; 16], _: [u8; 32]) {}
+	fn send(_: [u8; 32], _: [u8; 32], _: [u8; 32], _: u64, _: [u8; 16], _: [u8; 32]) {}
+	fn send_transfer(_: [u8; 16], _: [u8; 32], _: [u8; 16]) {}
+}
+
+/// Trait implemented by the runtime to send an XCM `Transact` to the AuthGate
+/// parachain (para 2003) whenever a `purchase_access` or `purchase_access_v2`
+/// is accepted on the DistProofHub chain.
+pub trait AccessKeyDispatch {
+	fn send(
+		app_id: [u8; 32],
+		nullifier: [u8; 32],
+		tx_id: [u8; 16],
+		access_key_commitment: [u8; 32],
+	);
+}
+
+/// No-op implementation used when XCM is not wired (e.g. tests).
+pub struct NoopAccessDispatch;
+impl AccessKeyDispatch for NoopAccessDispatch {
+	fn send(_: [u8; 32], _: [u8; 32], _: [u8; 16], _: [u8; 32]) {}
+}
+
+/// Configuration for a registered Web2 app on DistProofHub.
+/// Set by sudo via `set_access_config`.
+#[derive(Encode, Decode, Clone, PartialEq, Eq, Debug, TypeInfo, codec::MaxEncodedLen)]
+pub struct AppConfig {
+	/// Price in planck that the note must cover.
+	pub price: u64,
+	/// AccountId (raw 32 bytes) on DistProofHub that receives the payment.
+	pub payment_account: [u8; 32],
 }
 
 #[frame_support::pallet(dev_mode)]
@@ -90,6 +269,10 @@ pub mod pallet {
 	/// XCM dispatch: sends a `Transact` to the RWA parachain after a purchase.
 	/// Use `NoopRwaDispatch` when XCM is not needed.
 	type RwaDispatch: super::RwaPurchaseDispatch;
+	/// XCM dispatch: sends a `Transact` to the AuthGate parachain (para 2003)
+	/// after `purchase_access` or `purchase_access_v2`.
+	/// Use `NoopAccessDispatch` when XCM is not needed.
+	type AccessDispatch: super::AccessKeyDispatch;
 }
 
 pub type BalanceOf<T> =
@@ -113,17 +296,37 @@ pub type CurrentRoot<T: Config> = StorageValue<_, [u8; 32], ValueQuery>;
 pub type RecentRoots<T: Config> =
 	StorageValue<_, BoundedVec<[u8; 32], ConstU32<64>>, ValueQuery>;
 
+	/// Maps purchase tx_id → ownership_commitment (stored at purchase_rwa time).
+	/// Used by relist_private to verify the reseller holds the ownership note.
 	#[pallet::storage]
-	#[pallet::getter(fn commitment_amounts)]
-	pub type CommitmentAmounts<T: Config> =
-		StorageMap<_, Blake2_128Concat, [u8; 32], u64, ValueQuery>;
+	pub type OwnershipCommitments<T: Config> =
+		StorageMap<_, Blake2_128Concat, [u8; 16], [u8; 32], OptionQuery>;
 
-	/// Phase 6: Maps spend_tag → note value (registered at deposit time).
-	/// spend_tag = BLAKE3("nulla_spend_tag_v1" || deposit_pk_bytes)
-	/// The wallet provides this at deposit; it is unlinked from the commitment.
+	/// Guards against double-relist: once a tx_id is relisted, the original
+	/// ownership_commitment is consumed and cannot be used again.
 	#[pallet::storage]
-	pub type SpendTagValues<T: Config> =
-		StorageMap<_, Blake2_128Concat, [u8; 32], u64, ValueQuery>;
+	pub type OwnershipUsed<T: Config> =
+		StorageMap<_, Blake2_128Concat, [u8; 16], bool, ValueQuery>;
+
+	/// Phase 7: Maps spend_tag → note commitment (registered at deposit time).
+	/// No plaintext amounts stored on-chain — amounts are provided as witness at spend time.
+	/// spend_tag = BLAKE3("nulla_spend_tag_v1" || deposit_pk_bytes)
+	#[pallet::storage]
+	pub type SpendTagCommitments<T: Config> =
+		StorageMap<_, Blake2_128Concat, [u8; 32], [u8; 32], OptionQuery>;
+
+	/// Phase 8: Maps spend_tag → Poseidon rp_commitment (registered at deposit time).
+	/// rp_commitment = Poseidon(note_value, blinding); note_value and blinding are PRIVATE.
+	#[pallet::storage]
+	pub type SpendTagRpCommitments<T: Config> =
+		StorageMap<_, Blake2_128Concat, [u8; 32], [u8; 32], OptionQuery>;
+
+	/// Phase 8.1: Maps change spend_tag → Poseidon change_rp_commitment (registered at purchase time).
+	/// change_rp_commitment = Poseidon(iv, v-price, change_blinding); values are PRIVATE.
+	/// Stored when purchase_rwa creates a change note, used if that change note is later purchased.
+	#[pallet::storage]
+	pub type SpendTagChangeRpCommitments<T: Config> =
+		StorageMap<_, Blake2_128Concat, [u8; 32], [u8; 32], OptionQuery>;
 
 	/// Phase 6: Guards against double-spend via the same spend_tag.
 	/// A spend_tag can only be used once, regardless of the nullifier.
@@ -137,6 +340,13 @@ pub type RecentRoots<T: Config> =
 	#[pallet::getter(fn rwa_prices)]
 	pub type RwaPrices<T: Config> =
 		StorageMap<_, Blake2_128Concat, [u8; 32], u64, ValueQuery>;
+
+	/// Access-key config: app_id → AppConfig { price, payment_account }.
+	/// Set by sudo via `set_access_config`. Zero price = app not available.
+	#[pallet::storage]
+	#[pallet::getter(fn access_key_configs)]
+	pub type AccessKeyConfigs<T: Config> =
+		StorageMap<_, Blake2_128Concat, [u8; 32], super::AppConfig, OptionQuery>;
 
 	#[pallet::storage]
 	#[pallet::getter(fn genesis_initialized)]
@@ -156,6 +366,34 @@ pub type RecentRoots<T: Config> =
 	#[pallet::storage]
 	#[pallet::getter(fn commitment_index)]
 	pub type CommitmentIndex<T: Config> =
+		StorageMap<_, Blake2_128Concat, [u8; 32], u32, OptionQuery>;
+
+	// --- Phase 9: v2 incremental Poseidon tree (depth 20) ---
+
+	/// Frontier nodes of the v2 incremental Merkle tree (one per level).
+	#[pallet::storage]
+	pub type FrontierNodesV2<T: Config> =
+		StorageValue<_, [[u8; 32]; 20], ValueQuery>;
+
+	/// Number of leaves inserted into the v2 tree.
+	#[pallet::storage]
+	#[pallet::getter(fn leaf_count_v2)]
+	pub type LeafCountV2<T: Config> = StorageValue<_, u32, ValueQuery>;
+
+	/// Current root of the v2 tree.
+	#[pallet::storage]
+	#[pallet::getter(fn current_root_v2)]
+	pub type CurrentRootV2<T: Config> = StorageValue<_, [u8; 32], ValueQuery>;
+
+	/// Recent v2 roots window — spend proofs may anchor to any of these.
+	#[pallet::storage]
+	#[pallet::getter(fn recent_roots_v2)]
+	pub type RecentRootsV2<T: Config> =
+		StorageValue<_, BoundedVec<[u8; 32], ConstU32<64>>, ValueQuery>;
+
+	/// v2 leaf → index (duplicate prevention + wallet sync convenience).
+	#[pallet::storage]
+	pub type LeafIndexV2<T: Config> =
 		StorageMap<_, Blake2_128Concat, [u8; 32], u32, OptionQuery>;
 
 	#[pallet::genesis_config]
@@ -193,23 +431,81 @@ pub type RecentRoots<T: Config> =
 	pub enum Event<T: Config> {
 		DepositAccepted {
 			commitment: [u8; 32],
-			/// Phase 6: spend_tag = BLAKE3("nulla_spend_tag_v1" || deposit_pk_bytes).
-			/// Registered on-chain so it can be looked up at purchase time.
-			/// Unlinkable from `commitment` to an outside observer.
-			spend_tag: [u8; 32],
-			amount: u64,
+			// NOTE: spend_tag intentionally omitted from event to prevent linking
+			// this deposit to a future purchase_rwa call that carries the same tag.
+			// spend_tag is stored in SpendTagCommitments storage for on-chain lookup only.
+			// NOTE: amount intentionally omitted from event (Phase 7 privacy model).
 			new_merkle_root: [u8; 32],
 			hints_blob: BoundedVec<u8, ConstU32<4096>>,
 		},
 		/// A private note was successfully used to authorise an RWA purchase.
+		// NOTE: destination omitted from event — it is in the XCM message only.
+		// Emitting it here would reveal the buyer's RWA chain AccountId publicly.
 		RwaPurchaseAuthorized {
 			rwa_id: [u8; 32],
-			destination: Vec<u8>,
-			amount: u64,
+			// NOTE: amount intentionally omitted (Phase 7 privacy model).
 			tx_id: [u8; 16],
+		},
+		/// A change note was created when note_value exceeded the RWA price.
+		ChangeNoteCreated {
+			change_commitment: [u8; 32],
+			change_spend_tag: [u8; 32],
+			// NOTE: change_amount intentionally omitted (Phase 7 privacy model).
+			new_merkle_root: [u8; 32],
+		},
+		/// A private note was withdrawn back to public balance.
+		WithdrawCompleted {
+			spend_tag: [u8; 32],
+			// NOTE: amount intentionally omitted (Phase 7 privacy model).
+			tx_id: [u8; 16],
+		},
+		/// A private relist was initiated: new buyer's payment routed to reseller note.
+		RelistInitiated {
+			old_tx_id: [u8; 16],
+			new_tx_id: [u8; 16],
+			rwa_id: [u8; 32],
+			// NOTE: price intentionally omitted (Phase 7 privacy model).
+		},
+		/// A payment note was created for the reseller during relist_private.
+		PaymentNoteCreated {
+			payment_commitment: [u8; 32],
+			payment_spend_tag: [u8; 32],
+			// NOTE: payment_amount intentionally omitted (Phase 7 privacy model).
+			new_merkle_root: [u8; 32],
 		},
 		/// Sudo set a new price for an RWA.
 		RwaPriceSet { rwa_id: [u8; 32], price: u64 },
+		/// A private note was used to authorise an access-key grant (v1 ML-DSA path).
+		AccessPurchaseAuthorized {
+			app_id: [u8; 32],
+			tx_id: [u8; 16],
+		},
+		/// A v2 note was used to authorise an access-key grant (zk-membership path).
+		AccessPurchaseV2Authorized {
+			app_id: [u8; 32],
+			tx_id: [u8; 16],
+		},
+		/// Sudo set or updated an access-key app config.
+		AccessConfigSet { app_id: [u8; 32], price: u64 },
+		/// Phase 9: a v2 note leaf was inserted via deposit_v2.
+		/// Wallets sync (leaf, leaf_index) from this event stream to build Merkle paths.
+		DepositV2Accepted {
+			leaf: [u8; 32],
+			leaf_index: u32,
+			new_root: [u8; 32],
+			hints_blob: BoundedVec<u8, ConstU32<4096>>,
+		},
+		/// Phase 9: a v2 zk-membership purchase was authorized.
+		/// The change leaf is always inserted (zero-value change keeps uniform shape).
+		PurchaseV2Authorized {
+			rwa_id: [u8; 32],
+			tx_id: [u8; 16],
+			change_leaf: [u8; 32],
+			change_leaf_index: u32,
+			new_root: [u8; 32],
+		},
+		/// Phase 9: a v2 note was withdrawn back to public balance.
+		WithdrawV2Completed { tx_id: [u8; 16] },
 	}
 
 	#[pallet::error]
@@ -219,12 +515,32 @@ pub type RecentRoots<T: Config> =
 		MlDsaFailed,
 		/// The spend_tag was not registered at deposit time — deposit may not have occurred.
 		SpendTagNotFound,
-		/// This spend_tag has already been used in a previous purchase.
+		/// This spend_tag has already been used in a previous purchase or withdrawal.
 		SpendTagAlreadyUsed,
 		/// The requested RWA has no price set — not available for purchase.
 		RwaPriceNotSet,
 		/// The note's deposited value is less than the RWA price.
 		InsufficientFunds,
+		/// purchase_rwa: note_value > price but change_commitment / change_spend_tag are missing.
+		MissingChangeOutput,
+		/// relist_private: the supplied ownership_blinding does not match the stored commitment.
+		InvalidOwnershipProof,
+		/// relist_private: this ownership (tx_id) has already been relisted or transferred.
+		OwnershipAlreadyUsed,
+		/// relist_private: no ownership record found for the given tx_id.
+		OwnershipNotFound,
+		/// relist_private: the new buyer's note is smaller than the asking price.
+		BuyerInsufficientFunds,
+		/// Phase 9: legacy v1 deposits are disabled — use deposit_v2.
+		LegacyDisabled,
+		/// Phase 9: the v2 Merkle tree is full (2^20 leaves).
+		TreeFullV2,
+		/// Phase 9: the anchored merkle_root is neither current nor recent.
+		RootNotRecent,
+		/// Phase 9: this leaf is already in the v2 tree.
+		DuplicateLeaf,
+		/// The requested app has no config set — not available for purchase.
+		AccessAppNotConfigured,
 	}
 
 	// Allow purchase_rwa as unsigned too
@@ -236,7 +552,7 @@ pub type RecentRoots<T: Config> =
 			match call {
 				Call::purchase_rwa { public_inputs, .. } => {
 					if let Ok(inputs) = RwaPurchaseInputs::decode(&mut &public_inputs[..]) {
-						if !SpendTagValues::<T>::contains_key(inputs.spend_tag) {
+						if !SpendTagCommitments::<T>::contains_key(inputs.spend_tag) {
 							return InvalidTransaction::Stale.into();
 						}
 						if SpendTagUsed::<T>::get(inputs.spend_tag) {
@@ -249,6 +565,111 @@ pub type RecentRoots<T: Config> =
 							.and_provides(inputs.tx_id)
 							.and_provides(inputs.nullifier)
 							.and_provides(inputs.spend_tag)
+							.priority(100)
+							.longevity(64)
+							.propagate(true)
+							.build()
+					} else { InvalidTransaction::Call.into() }
+				}
+				Call::withdraw_private { public_inputs, .. } => {
+					if let Ok(inputs) = WithdrawInputs::decode(&mut &public_inputs[..]) {
+						if !SpendTagCommitments::<T>::contains_key(inputs.spend_tag) {
+							return InvalidTransaction::Stale.into();
+						}
+						if SpendTagUsed::<T>::get(inputs.spend_tag) {
+							return InvalidTransaction::Stale.into();
+						}
+						ValidTransaction::with_tag_prefix("NullaWithdraw")
+							.and_provides(inputs.tx_id)
+							.and_provides(inputs.spend_tag)
+							.priority(100)
+							.longevity(64)
+							.propagate(true)
+							.build()
+					} else { InvalidTransaction::Call.into() }
+				}
+				Call::relist_private { inputs: relist, .. } => {
+					if OwnershipCommitments::<T>::get(relist.old_tx_id).is_some()
+						&& !OwnershipUsed::<T>::get(relist.old_tx_id)
+						&& SpendTagCommitments::<T>::contains_key(relist.new_buyer_spend_tag)
+						&& !SpendTagUsed::<T>::get(relist.new_buyer_spend_tag)
+					{
+						ValidTransaction::with_tag_prefix("NullaRelist")
+							.and_provides(relist.new_tx_id)
+							.and_provides(relist.new_buyer_spend_tag)
+							.priority(100)
+							.longevity(64)
+							.propagate(true)
+							.build()
+					} else { InvalidTransaction::Stale.into() }
+				}
+				Call::purchase_rwa_v2 { public_inputs, .. } => {
+					if let Ok(inputs) = SpendPublicV2::decode(&mut &public_inputs[..]) {
+						if NullifierUsed::<T>::get(inputs.nullifier) {
+							return InvalidTransaction::Stale.into();
+						}
+						if !Self::v2_root_anchored(&inputs.merkle_root) {
+							return InvalidTransaction::Stale.into();
+						}
+						ValidTransaction::with_tag_prefix("NullaPurchaseV2")
+							.and_provides(inputs.tx_id)
+							.and_provides(inputs.nullifier)
+							.priority(100)
+							.longevity(64)
+							.propagate(true)
+							.build()
+					} else { InvalidTransaction::Call.into() }
+				}
+				Call::withdraw_v2 { public_inputs, .. } => {
+					if let Ok(inputs) = WithdrawPublicV2::decode(&mut &public_inputs[..]) {
+						if NullifierUsed::<T>::get(inputs.nullifier) {
+							return InvalidTransaction::Stale.into();
+						}
+						if !Self::v2_root_anchored(&inputs.merkle_root) {
+							return InvalidTransaction::Stale.into();
+						}
+						ValidTransaction::with_tag_prefix("NullaWithdrawV2")
+							.and_provides(inputs.tx_id)
+							.and_provides(inputs.nullifier)
+							.priority(100)
+							.longevity(64)
+							.propagate(true)
+							.build()
+					} else { InvalidTransaction::Call.into() }
+				}
+				// ── Access-key lanes ────────────────────────────────────────────────
+				Call::purchase_access { public_inputs, .. } => {
+					if let Ok(inputs) = RwaPurchaseInputs::decode(&mut &public_inputs[..]) {
+						if !SpendTagCommitments::<T>::contains_key(inputs.spend_tag) {
+							return InvalidTransaction::Stale.into();
+						}
+						if SpendTagUsed::<T>::get(inputs.spend_tag) {
+							return InvalidTransaction::Stale.into();
+						}
+						if NullifierUsed::<T>::get(inputs.nullifier) {
+							return InvalidTransaction::Stale.into();
+						}
+						ValidTransaction::with_tag_prefix("DistAccessPurchase")
+							.and_provides(inputs.tx_id)
+							.and_provides(inputs.nullifier)
+							.and_provides(inputs.spend_tag)
+							.priority(100)
+							.longevity(64)
+							.propagate(true)
+							.build()
+					} else { InvalidTransaction::Call.into() }
+				}
+				Call::purchase_access_v2 { public_inputs, .. } => {
+					if let Ok(inputs) = SpendPublicV2::decode(&mut &public_inputs[..]) {
+						if NullifierUsed::<T>::get(inputs.nullifier) {
+							return InvalidTransaction::Stale.into();
+						}
+						if !Self::v2_root_anchored(&inputs.merkle_root) {
+							return InvalidTransaction::Stale.into();
+						}
+						ValidTransaction::with_tag_prefix("DistAccessPurchaseV2")
+							.and_provides(inputs.tx_id)
+							.and_provides(inputs.nullifier)
 							.priority(100)
 							.longevity(64)
 							.propagate(true)
@@ -289,46 +710,33 @@ pub type RecentRoots<T: Config> =
 			}
 			cur[0]
 		}
-	}
 
-	#[pallet::call]
-	impl<T: Config> Pallet<T> {
-		#[pallet::weight(Weight::zero())]
-		pub fn deposit_public(
-			origin: OriginFor<T>,
-			commitment: alloc::vec::Vec<u8>,
-			amount: u128,
-			blinding: alloc::vec::Vec<u8>,
-			// Phase 6: spend_tag = BLAKE3("nulla_spend_tag_v1" || deposit_pk_bytes)
-			// Registered on-chain to enable unlinkable purchase later.
+		/// Insert a private note into the Merkle tree and register its spend_tag.
+		/// Returns the new Merkle root.
+		/// DOES NOT update CurrentRoot/MerkleRoot/RecentRoots — caller must do so.
+		fn do_insert_note(
+			commitment: [u8; 32],
 			spend_tag: [u8; 32],
-			hints_blob: BoundedVec<u8, ConstU32<4096>>,
-		) -> DispatchResult {
-			let who = ensure_signed(origin)?;
-			ensure!(commitment.len() == 32 && blinding.len() == 32, Error::<T>::ProofVerificationFailed);
-			let mut c_arr = [0u8; 32]; c_arr.copy_from_slice(&commitment[..32]);
-			let mut b_arr = [0u8; 32]; b_arr.copy_from_slice(&blinding[..32]);
-			let amt_u64: u64 = amount.unique_saturated_into();
-			ensure!(T::ProofVerifier::pedersen_check_u64(amt_u64, b_arr, c_arr), Error::<T>::ProofVerificationFailed);
-			let pool = T::PoolAccount::get();
-			let value: BalanceOf<T> = amount.unique_saturated_into();
-			T::Currency::transfer(&who, &pool, value, ExistenceRequirement::KeepAlive)?;
-			ensure!(!CommitmentIndex::<T>::contains_key(&c_arr), Error::<T>::ProofVerificationFailed);
-			let mut leaves = Leaves::<T>::get();
-			let leaf = Self::leaf_hash(c_arr);
+			leaves: &mut alloc::vec::Vec<[u8; 32]>,
+		) -> Option<[u8; 32]> {
+			if CommitmentIndex::<T>::contains_key(&commitment) { return None; }
+			let leaf = Self::leaf_hash(commitment);
 			let idx = leaves.len() as u32;
-			ensure!(leaves.try_push(leaf).is_ok(), Error::<T>::ProofVerificationFailed);
-			CommitmentIndex::<T>::insert(&c_arr, idx);
-			CommitmentAmounts::<T>::insert(&c_arr, amt_u64);
-			// Phase 6: register spend_tag → value for unlinkable purchase lookup
-			SpendTagValues::<T>::insert(spend_tag, amt_u64);
-			let computed_root = Self::compute_merkle_root(&leaves);
-			Leaves::<T>::put(leaves);
+			leaves.push(leaf);
+			CommitmentIndex::<T>::insert(&commitment, idx);
+			SpendTagCommitments::<T>::insert(spend_tag, commitment);
+			Some(Self::compute_merkle_root(leaves))
+		}
+
+		/// Commit the Merkle state after one or more note insertions.
+		fn commit_merkle(leaves_vec: alloc::vec::Vec<[u8; 32]>, new_root: [u8; 32]) {
+			let bounded: BoundedVec<[u8; 32], ConstU32<1048576>> =
+				BoundedVec::try_from(leaves_vec).unwrap_or_default();
+			Leaves::<T>::put(&bounded);
 			let prev = CurrentRoot::<T>::get();
-			CurrentRoot::<T>::put(computed_root);
-			MerkleRoot::<T>::put(computed_root);
-			let leaf_count = Leaves::<T>::get().len() as u32;
-			RootLeafCount::<T>::insert(computed_root, leaf_count);
+			CurrentRoot::<T>::put(new_root);
+			MerkleRoot::<T>::put(new_root);
+			RootLeafCount::<T>::insert(new_root, bounded.len() as u32);
 			let mut window = RecentRoots::<T>::get();
 			if window.len() >= 64 {
 				let mut shifted: BoundedVec<[u8; 32], ConstU32<64>> = BoundedVec::default();
@@ -337,25 +745,90 @@ pub type RecentRoots<T: Config> =
 			}
 			let _ = window.try_push(prev);
 			RecentRoots::<T>::put(&window);
-			Self::deposit_event(Event::DepositAccepted { commitment: c_arr, spend_tag, amount: amt_u64, new_merkle_root: computed_root, hints_blob });
-			Ok(())
 		}
 
-		/// Spend a private note to purchase an RWA on the RWA appchain.
-		///
-		/// Phase 6 privacy model: `input_commitment` is no longer in public inputs.
-		/// Instead, the wallet registers a `spend_tag` at deposit time:
-		///   spend_tag = BLAKE3("nulla_spend_tag_v1" || deposit_pk_bytes)
-		///
-		/// The purchase proof = [deposit_pk (1312)] || [sig (2420)] where `sig` is
-		/// an ML-DSA-44 signature over the public inputs using the deposit-time
-		/// secret key.  On-chain verification checks:
-		///   1. BLAKE3("nulla_spend_tag_v1" || proof_pk) == inputs.spend_tag
-		///   2. ML-DSA-44 signature is valid
-		///
-		/// Privacy: an observer sees `commitment` in `DepositAccepted` and
-		/// `spend_tag` in `purchase_rwa` — two different opaque values with no
-		/// on-chain link.  The link can only be made by the wallet holding `deposit_sk`.
+		/// Compute ownership commitment:
+		/// BLAKE3("nulla_rwa_ownership_v1" || rwa_id || blinding)
+		/// Must match exactly what the wallet and verifier compute.
+		fn compute_ownership_commitment(rwa_id: [u8; 32], blinding: [u8; 32]) -> [u8; 32] {
+			let mut h = blake3::Hasher::new();
+			h.update(b"nulla_rwa_ownership_v1");
+			h.update(&rwa_id);
+			h.update(&blinding);
+			*h.finalize().as_bytes()
+		}
+
+		/// Phase 9: pkd = BLAKE3("nulla_pk_digest_v2" || ml_dsa_pk).
+		fn compute_pk_digest(pk: &[u8]) -> [u8; 32] {
+			let mut h = blake3::Hasher::new();
+			h.update(b"nulla_pk_digest_v2");
+			h.update(pk);
+			*h.finalize().as_bytes()
+		}
+
+		/// Phase 9: check root anchoring against CurrentRootV2 / RecentRootsV2.
+		fn v2_root_anchored(root: &[u8; 32]) -> bool {
+			if *root == CurrentRootV2::<T>::get() { return true; }
+			RecentRootsV2::<T>::get().iter().any(|r| r == root)
+		}
+
+		/// Phase 9: insert a leaf into the v2 incremental tree.
+		/// Updates frontier, leaf count, current root, recent-roots window,
+		/// and the leaf index map. Returns (leaf_index, new_root).
+		fn v2_insert(leaf: [u8; 32]) -> Result<(u32, [u8; 32]), Error<T>> {
+			ensure!(!LeafIndexV2::<T>::contains_key(&leaf), Error::<T>::DuplicateLeaf);
+			let nodes = FrontierNodesV2::<T>::get();
+			let count = LeafCountV2::<T>::get();
+			let (new_nodes, new_count, new_root) =
+				T::ProofVerifier::v2_insert_leaf(nodes, count, leaf)
+					.ok_or(Error::<T>::TreeFullV2)?;
+			let idx = count;
+			FrontierNodesV2::<T>::put(new_nodes);
+			LeafCountV2::<T>::put(new_count);
+			LeafIndexV2::<T>::insert(&leaf, idx);
+			let prev = CurrentRootV2::<T>::get();
+			CurrentRootV2::<T>::put(new_root);
+			if count > 0 {
+				let mut window = RecentRootsV2::<T>::get();
+				if window.len() >= 64 {
+					let mut shifted: BoundedVec<[u8; 32], ConstU32<64>> = BoundedVec::default();
+					for i in 1..window.len() { let _ = shifted.try_push(window[i]); }
+					window = shifted;
+				}
+				let _ = window.try_push(prev);
+				RecentRootsV2::<T>::put(&window);
+			}
+			Ok((idx, new_root))
+		}
+	}
+
+	#[pallet::call]
+	impl<T: Config> Pallet<T> {
+		// Pays::No: the deposit itself IS the "payment" (1 NULLA → pool). Length fees
+		// on a 24 KB STARK-proof extrinsic would otherwise require the depositor to hold
+		// extra balance above the deposit amount, creating an unnecessary friction point
+		// for a privacy protocol.  Pool validation still checks nonce & signature.
+		#[pallet::weight((Weight::zero(), Pays::No))]
+		pub fn deposit_public(
+			origin: OriginFor<T>,
+			commitment: [u8; 32],
+			// Phase 8: wire format: [1:u8][range_len:u32LE][range_bytes][v:u64LE][commit_len:u32LE][commit_bytes]
+			range_proof: BoundedVec<u8, ConstU32<65536>>,
+			// Phase 8: Poseidon rp_commitment = Poseidon(v, blinding); blinding is PRIVATE.
+			rp_commitment: [u8; 32],
+			// Phase 6: spend_tag = BLAKE3("nulla_spend_tag_v1" || deposit_pk_bytes)
+			// Registered on-chain to enable unlinkable purchase later.
+			spend_tag: [u8; 32],
+			hints_blob: BoundedVec<u8, ConstU32<4096>>,
+		) -> DispatchResult {
+			let _ = ensure_signed(origin)?;
+			// Phase 9 (spec 127): legacy v1 deposits are DISABLED.
+			// v1 notes remain spendable via purchase_rwa / withdraw_private as an
+			// exit ramp; new deposits must use deposit_v2 (zk-membership pool).
+			let _ = (commitment, range_proof, rp_commitment, spend_tag, hints_blob);
+			Err(Error::<T>::LegacyDisabled.into())
+		}
+
 		#[pallet::weight(Weight::zero())]
 		pub fn purchase_rwa(
 			origin: OriginFor<T>,
@@ -367,47 +840,262 @@ pub type RecentRoots<T: Config> =
 			let inputs = RwaPurchaseInputs::decode(&mut &public_inputs[..])
 				.map_err(|_| Error::<T>::ProofVerificationFailed)?;
 
-			// Check nullifier has not been spent
 			ensure!(!NullifierUsed::<T>::get(inputs.nullifier), Error::<T>::NullifierAlreadyUsed);
-
-			// Phase 6: verify spend_tag was registered at deposit time
-			ensure!(SpendTagValues::<T>::contains_key(inputs.spend_tag), Error::<T>::SpendTagNotFound);
-
-			// Phase 6: verify spend_tag has not already been used
+			ensure!(SpendTagCommitments::<T>::contains_key(inputs.spend_tag), Error::<T>::SpendTagNotFound);
 			ensure!(!SpendTagUsed::<T>::get(inputs.spend_tag), Error::<T>::SpendTagAlreadyUsed);
 
-			// Look up note value via spend_tag (registered at deposit, commitment not needed)
-			let note_value = SpendTagValues::<T>::get(inputs.spend_tag);
-
-			// Check note value against RWA price
 			let price = RwaPrices::<T>::get(inputs.rwa_id);
 			ensure!(price > 0, Error::<T>::RwaPriceNotSet);
-			ensure!(note_value >= price, Error::<T>::InsufficientFunds);
 
-			// Verify ML-DSA-44 proof — includes spend_tag derivation check (Phase 6)
+			// Phase 8.1: resolve change_rp_commitment.
+			// When a change note is present the client must have previously registered its
+			// rp_commitment via deposit_public. When there is no change note (v == price)
+			// pass [0u8;32] — the circuit treats it as the zero-change case.
+			let change_rp_commitment: [u8; 32] = if let Some(t_change) = inputs.change_spend_tag {
+				SpendTagRpCommitments::<T>::get(t_change)
+					.ok_or(Error::<T>::SpendTagNotFound)?
+			} else {
+				[0u8; 32]
+			};
+
+			// Phase 8 + 8.1: verify PurchaseAir STARK.
+			// Proves: Poseidon(iv,v,blinding)=rp_commitment AND v>=price
+			//     AND Poseidon(iv,v-price,c_blinding)=change_rp_commitment
+			let stored_rp = SpendTagRpCommitments::<T>::get(inputs.spend_tag)
+				.ok_or(Error::<T>::SpendTagNotFound)?;
+			ensure!(
+				T::ProofVerifier::verify_purchase_proof(&inputs.purchase_proof, &stored_rp, &change_rp_commitment, price),
+				Error::<T>::ProofVerificationFailed
+			);
+
 			ensure!(T::ProofVerifier::verify_purchase(&proof, &public_inputs), Error::<T>::MlDsaFailed);
 
-			// Mark nullifier and spend_tag as used (double-spend prevention)
 			NullifierUsed::<T>::insert(inputs.nullifier, true);
 			SpendTagUsed::<T>::insert(inputs.spend_tag, true);
 
+			// Store ownership commitment so relist_private can verify ownership later
+			OwnershipCommitments::<T>::insert(inputs.tx_id, inputs.ownership_commitment);
+
+			// Insert change note if client created one (v > price case).
+			// v123 fix: emit ChangeNoteCreated unconditionally when change fields are
+			// present. If do_insert_note returns None the commitment was already
+			// inserted during the mandatory change-note pre-deposit (deposit_public
+			// registers SpendTagRpCommitments). The note is already spendable in the
+			// tree — use CurrentRoot as the canonical root for the event.
+			if let (Some(c_change), Some(t_change)) = (inputs.change_commitment, inputs.change_spend_tag) {
+				// Record the change note's rp_commitment so it can be used as input_rp
+				// if this change note is later spent via another purchase_rwa call.
+				SpendTagChangeRpCommitments::<T>::insert(t_change, change_rp_commitment);
+				let mut leaves_vec: alloc::vec::Vec<[u8; 32]> = Leaves::<T>::get().into_inner();
+				let new_root = match Self::do_insert_note(c_change, t_change, &mut leaves_vec) {
+					Some(root) => {
+						Self::commit_merkle(leaves_vec, root);
+						root
+					}
+					None => {
+						// Commitment already in tree from pre-deposit — note is spendable.
+						CurrentRoot::<T>::get()
+					}
+				};
+				Self::deposit_event(Event::ChangeNoteCreated {
+					change_commitment: c_change,
+					change_spend_tag: t_change,
+					new_merkle_root: new_root,
+				});
+			}
+
 			Self::deposit_event(Event::RwaPurchaseAuthorized {
 				rwa_id: inputs.rwa_id,
-				destination: inputs.destination.clone(),
-				amount: note_value,
 				tx_id: inputs.tx_id,
 			});
 
-			// Phase 4: XCM — dispatch to RWA parachain (para 2001).
-			// Phase 6: pass spend_tag instead of commitment (commitment stays private).
 			T::RwaDispatch::send(
 				inputs.rwa_id,
-				inputs.destination,
+				// destination is NOT forwarded — covered by proof binding only.
+				// Buyer proves ownership on RWA chain via ownership_blinding.
 				inputs.nullifier,
 				inputs.spend_tag,
-				note_value,
+				price,
 				inputs.tx_id,
 				inputs.ownership_commitment,
+			);
+
+			Ok(())
+		}
+
+		/// Withdraw a private note back to public balance.
+		///
+		/// The caller proves ownership of the spend_tag via ML-DSA-44 signature
+		/// with domain \"nulla_withdrawal_v1\".  The verifier also checks:
+		///   BLAKE3(\"nulla_spend_tag_v1\" || pk_from_proof) == inputs.spend_tag
+		///
+		/// On success the pool transfers the note value to `inputs.destination`
+		/// and marks the spend_tag as used.
+		#[pallet::weight(Weight::zero())]
+		pub fn withdraw_private(
+			origin: OriginFor<T>,
+			proof: Vec<u8>,
+			public_inputs: Vec<u8>,
+		) -> DispatchResult {
+			ensure_none(origin)?;
+
+			let inputs = WithdrawInputs::decode(&mut &public_inputs[..])
+				.map_err(|_| Error::<T>::ProofVerificationFailed)?;
+
+			ensure!(SpendTagCommitments::<T>::contains_key(inputs.spend_tag), Error::<T>::SpendTagNotFound);
+			ensure!(!SpendTagUsed::<T>::get(inputs.spend_tag), Error::<T>::SpendTagAlreadyUsed);
+
+			ensure!(T::ProofVerifier::verify_withdrawal(&proof, &public_inputs), Error::<T>::MlDsaFailed);
+
+			// Phase 7: verify commitment opening — proves note_value is the value inside the stored commitment.
+			let stored_commitment = SpendTagCommitments::<T>::get(inputs.spend_tag)
+				.ok_or(Error::<T>::SpendTagNotFound)?;
+			ensure!(
+				T::ProofVerifier::verify_commitment(inputs.note_value, inputs.note_blinding, stored_commitment),
+				Error::<T>::ProofVerificationFailed
+			);
+			let amount = inputs.note_value;
+			SpendTagUsed::<T>::insert(inputs.spend_tag, true);
+
+			// Decode destination AccountId
+			ensure!(inputs.destination.len() == 32, Error::<T>::ProofVerificationFailed);
+			let mut dest_bytes = [0u8; 32];
+			dest_bytes.copy_from_slice(&inputs.destination[..32]);
+			let dest: T::AccountId = Decode::decode(&mut &dest_bytes[..])
+				.map_err(|_| Error::<T>::ProofVerificationFailed)?;
+
+			let pool = T::PoolAccount::get();
+			let value: BalanceOf<T> = (amount as u128).unique_saturated_into();
+			T::Currency::transfer(&pool, &dest, value, ExistenceRequirement::AllowDeath)?;
+
+			Self::deposit_event(Event::WithdrawCompleted {
+				spend_tag: inputs.spend_tag,
+				tx_id: inputs.tx_id,
+			});
+			Ok(())
+		}
+
+		/// Private peer-to-peer RWA ownership transfer (resell without revealing identity).
+		///
+		/// The reseller proves ownership via BLAKE3 preimage of the stored
+		/// ownership_commitment.  No ML-DSA-44 signature required \u2014 knowledge of
+		/// `ownership_blinding` IS the proof of ownership.
+		///
+		/// On success:
+		///   - New buyer's spend_tag consumed, payment note created for reseller
+		///   - Optional change note created if buyer note > price
+		///   - XCM sent to RWA chain to update the ownership record
+		///
+		/// Only the final redemption (redeem_rwa_ownership on RWA chain) is public.
+		#[pallet::weight(Weight::zero())]
+		pub fn relist_private(
+			origin: OriginFor<T>,
+			inputs: RelistInputs,
+		) -> DispatchResult {
+			ensure_none(origin)?;
+
+			// 1. Verify ownership via BLAKE3 preimage
+			let stored_oc = OwnershipCommitments::<T>::get(inputs.old_tx_id)
+				.ok_or(Error::<T>::OwnershipNotFound)?;
+			ensure!(!OwnershipUsed::<T>::get(inputs.old_tx_id), Error::<T>::OwnershipAlreadyUsed);
+
+			// BLAKE3("nulla_rwa_ownership_v1" || rwa_id || blinding) == stored_oc
+			ensure!(
+				Self::compute_ownership_commitment(inputs.rwa_id, inputs.ownership_blinding) == stored_oc,
+				Error::<T>::InvalidOwnershipProof
+			);
+
+			// 2. Verify new buyer has sufficient funds via commitment opening
+			ensure!(SpendTagCommitments::<T>::contains_key(inputs.new_buyer_spend_tag), Error::<T>::SpendTagNotFound);
+			ensure!(!SpendTagUsed::<T>::get(inputs.new_buyer_spend_tag), Error::<T>::SpendTagAlreadyUsed);
+			// Phase 7: verify buyer commitment opening — proves buyer_value is inside stored commitment.
+			let buyer_stored_commitment = SpendTagCommitments::<T>::get(inputs.new_buyer_spend_tag)
+				.ok_or(Error::<T>::SpendTagNotFound)?;
+			ensure!(
+				T::ProofVerifier::verify_commitment(inputs.buyer_value, inputs.buyer_blinding, buyer_stored_commitment),
+				Error::<T>::ProofVerificationFailed
+			);
+			let buyer_note_value = inputs.buyer_value;
+			ensure!(buyer_note_value >= inputs.price, Error::<T>::BuyerInsufficientFunds);
+
+			let change_amount = buyer_note_value - inputs.price;
+			if change_amount > 0 {
+				ensure!(
+					inputs.change_commitment.is_some()
+						&& inputs.change_spend_tag.is_some()
+						&& inputs.change_value.is_some()
+						&& inputs.change_blinding.is_some(),
+					Error::<T>::MissingChangeOutput
+				);
+				// Phase 7: verify change commitment opening and conservation.
+				let c_v = inputs.change_value.unwrap();
+				let c_b = inputs.change_blinding.unwrap();
+				let c_c = inputs.change_commitment.unwrap();
+				ensure!(c_v == change_amount, Error::<T>::ProofVerificationFailed);
+				ensure!(
+					T::ProofVerifier::verify_commitment(c_v, c_b, c_c),
+					Error::<T>::ProofVerificationFailed
+				);
+			}
+			// Phase 7: verify payment commitment opening — proves payment_commitment = BLAKE3(domain||price||payment_blinding).
+			ensure!(
+				T::ProofVerifier::verify_commitment(inputs.price, inputs.payment_blinding, inputs.payment_commitment),
+				Error::<T>::ProofVerificationFailed
+			);
+
+			// 3. Mark ownership and buyer spend_tag as consumed
+			OwnershipUsed::<T>::insert(inputs.old_tx_id, true);
+			SpendTagUsed::<T>::insert(inputs.new_buyer_spend_tag, true);
+
+			// 4. Insert reseller payment note into Merkle tree
+			let mut leaves_vec: alloc::vec::Vec<[u8; 32]> = Leaves::<T>::get().into_inner();
+			let payment_root = Self::do_insert_note(
+				inputs.payment_commitment,
+				inputs.payment_spend_tag,
+				&mut leaves_vec,
+			).ok_or(Error::<T>::ProofVerificationFailed)?;
+			let final_root;
+
+			// 5. Insert change note if needed
+			if change_amount > 0 {
+				let c_change = inputs.change_commitment.unwrap();
+				let t_change = inputs.change_spend_tag.unwrap();
+				if let Some(change_root) = Self::do_insert_note(c_change, t_change, &mut leaves_vec) {
+					Self::commit_merkle(leaves_vec, change_root);
+					Self::deposit_event(Event::ChangeNoteCreated {
+						change_commitment: c_change,
+						change_spend_tag: t_change,
+						new_merkle_root: change_root,
+					});
+					final_root = change_root;
+				} else {
+					Self::commit_merkle(leaves_vec, payment_root);
+					final_root = payment_root;
+				}
+			} else {
+				Self::commit_merkle(leaves_vec, payment_root);
+				final_root = payment_root;
+			}
+
+			// 6. Register new ownership commitment for the new buyer
+			OwnershipCommitments::<T>::insert(inputs.new_tx_id, inputs.new_ownership_commitment);
+
+			Self::deposit_event(Event::PaymentNoteCreated {
+				payment_commitment: inputs.payment_commitment,
+				payment_spend_tag: inputs.payment_spend_tag,
+				new_merkle_root: final_root,
+			});
+			Self::deposit_event(Event::RelistInitiated {
+				old_tx_id: inputs.old_tx_id,
+				new_tx_id: inputs.new_tx_id,
+				rwa_id: inputs.rwa_id,
+			});
+
+			// 7. XCM to RWA chain: transfer ownership record
+			T::RwaDispatch::send_transfer(
+				inputs.old_tx_id,
+				inputs.new_ownership_commitment,
+				inputs.new_tx_id,
 			);
 
 			Ok(())
@@ -424,6 +1112,353 @@ pub type RecentRoots<T: Config> =
 			ensure_root(origin)?;
 			RwaPrices::<T>::insert(rwa_id, price);
 			Self::deposit_event(Event::RwaPriceSet { rwa_id, price });
+			Ok(())
+		}
+
+		/// Set or update the config for a Web2 access-key app (sudo only).
+		///
+		/// `app_id`: 32-byte identifier matching the one registered on AuthGate.
+		/// `price`: value in planck the note must cover. Zero de-lists the app.
+		/// `payment_account`: raw 32-byte AccountId on DistProofHub that receives
+		///                     the note value when a purchase succeeds.
+		#[pallet::weight(Weight::zero())]
+		pub fn set_access_config(
+			origin: OriginFor<T>,
+			app_id: [u8; 32],
+			price: u64,
+			payment_account: [u8; 32],
+		) -> DispatchResult {
+			ensure_root(origin)?;
+			let cfg = super::AppConfig { price, payment_account };
+			AccessKeyConfigs::<T>::insert(app_id, cfg);
+			Self::deposit_event(Event::AccessConfigSet { app_id, price });
+			Ok(())
+		}
+
+		/// Purchase access to a Web2 app privately — v1 ML-DSA-44 + STARK path.
+		///
+		/// Identical to `purchase_rwa` except:
+		/// - `app_id` replaces `rwa_id` in `public_inputs` (first 32 bytes of
+		///   `RwaPurchaseInputs::spend_tag` are unchanged; `rwa_id` field carries
+		///   `app_id` semantically)
+		/// - Uses `AccessKeyConfigs` for price lookup instead of `RwaPrices`
+		/// - `ownership_commitment` carries `access_key_commitment`
+		///   = BLAKE3("nulla_access_key_v1" || app_id || blinding)
+		/// - Transfers price from pool → app `payment_account` on this chain
+		/// - Sends XCM to AuthGate (para 2003) via `T::AccessDispatch`
+		///
+		/// All RWA state is completely unchanged.
+		/// UNSIGNED. Privacy preserved via ML-DSA-44 + STARK proof binding.
+		#[pallet::weight(Weight::zero())]
+		pub fn purchase_access(
+			origin: OriginFor<T>,
+			proof: Vec<u8>,
+			public_inputs: Vec<u8>,
+		) -> DispatchResult {
+			ensure_none(origin)?;
+
+			let inputs = RwaPurchaseInputs::decode(&mut &public_inputs[..])
+				.map_err(|_| Error::<T>::ProofVerificationFailed)?;
+
+			ensure!(!NullifierUsed::<T>::get(inputs.nullifier), Error::<T>::NullifierAlreadyUsed);
+			ensure!(SpendTagCommitments::<T>::contains_key(inputs.spend_tag), Error::<T>::SpendTagNotFound);
+			ensure!(!SpendTagUsed::<T>::get(inputs.spend_tag), Error::<T>::SpendTagAlreadyUsed);
+
+			// rwa_id field carries app_id in this lane
+			let app_id = inputs.rwa_id;
+			let cfg = AccessKeyConfigs::<T>::get(app_id)
+				.ok_or(Error::<T>::AccessAppNotConfigured)?;
+			ensure!(cfg.price > 0, Error::<T>::AccessAppNotConfigured);
+
+			let change_rp_commitment: [u8; 32] = if let Some(t_change) = inputs.change_spend_tag {
+				SpendTagRpCommitments::<T>::get(t_change)
+					.ok_or(Error::<T>::SpendTagNotFound)?
+			} else {
+				[0u8; 32]
+			};
+
+			let stored_rp = SpendTagRpCommitments::<T>::get(inputs.spend_tag)
+				.ok_or(Error::<T>::SpendTagNotFound)?;
+			ensure!(
+				T::ProofVerifier::verify_purchase_proof(&inputs.purchase_proof, &stored_rp, &change_rp_commitment, cfg.price),
+				Error::<T>::ProofVerificationFailed
+			);
+			ensure!(T::ProofVerifier::verify_purchase(&proof, &public_inputs), Error::<T>::MlDsaFailed);
+
+			NullifierUsed::<T>::insert(inputs.nullifier, true);
+			SpendTagUsed::<T>::insert(inputs.spend_tag, true);
+
+			// Handle change note if present.
+			if let (Some(c_change), Some(t_change)) = (inputs.change_commitment, inputs.change_spend_tag) {
+				SpendTagChangeRpCommitments::<T>::insert(t_change, change_rp_commitment);
+				let mut leaves_vec: alloc::vec::Vec<[u8; 32]> = Leaves::<T>::get().into_inner();
+				let new_root = match Self::do_insert_note(c_change, t_change, &mut leaves_vec) {
+					Some(root) => { Self::commit_merkle(leaves_vec, root); root }
+					None => CurrentRoot::<T>::get(),
+				};
+				Self::deposit_event(Event::ChangeNoteCreated {
+					change_commitment: c_change,
+					change_spend_tag: t_change,
+					new_merkle_root: new_root,
+				});
+			}
+
+			// Transfer price from pool to app payment account on this chain.
+			let payment_dest: T::AccountId =
+				Decode::decode(&mut &cfg.payment_account[..])
+					.map_err(|_| Error::<T>::ProofVerificationFailed)?;
+			let pool = T::PoolAccount::get();
+			let amount: BalanceOf<T> = (cfg.price as u128).unique_saturated_into();
+			T::Currency::transfer(&pool, &payment_dest, amount, ExistenceRequirement::AllowDeath)?;
+
+			// access_key_commitment lives in the ownership_commitment field
+			let access_key_commitment = inputs.ownership_commitment;
+			let tx_id = inputs.tx_id;
+
+			Self::deposit_event(Event::AccessPurchaseAuthorized { app_id, tx_id });
+
+			// XCM to AuthGate (para 2003): nullifier = spend_tag (public nullifier for this lane)
+			T::AccessDispatch::send(app_id, inputs.nullifier, tx_id, access_key_commitment);
+
+			Ok(())
+		}
+
+		/// Purchase access to a Web2 app privately — v2 zk-membership path.
+		///
+		/// Identical to `purchase_rwa_v2` except:
+		/// - Uses `AccessKeyConfigs` for price lookup instead of `RwaPrices`
+		/// - `rwa_id` field in `SpendPublicV2` carries `app_id`
+		/// - `ownership_commitment` carries `access_key_commitment`
+		/// - Transfers price from pool → app `payment_account` on this chain
+		/// - Sends XCM to AuthGate (para 2003) via `T::AccessDispatch`
+		///
+		/// UNSIGNED. TRUE unlinkability via zk-membership STARK.
+		#[pallet::weight(Weight::zero())]
+		pub fn purchase_access_v2(
+			origin: OriginFor<T>,
+			auth: Vec<u8>,
+			public_inputs: Vec<u8>,
+			spend_proof: Vec<u8>,
+		) -> DispatchResult {
+			ensure_none(origin)?;
+
+			let inputs = SpendPublicV2::decode(&mut &public_inputs[..])
+				.map_err(|_| Error::<T>::ProofVerificationFailed)?;
+
+			ensure!(!NullifierUsed::<T>::get(inputs.nullifier), Error::<T>::NullifierAlreadyUsed);
+			ensure!(Self::v2_root_anchored(&inputs.merkle_root), Error::<T>::RootNotRecent);
+
+			// rwa_id field carries app_id in this lane
+			let app_id = inputs.rwa_id;
+			let cfg = AccessKeyConfigs::<T>::get(app_id)
+				.ok_or(Error::<T>::AccessAppNotConfigured)?;
+			ensure!(cfg.price > 0, Error::<T>::AccessAppNotConfigured);
+
+			ensure!(
+				T::ProofVerifier::verify_spend_auth_v2(&auth, &public_inputs, false),
+				Error::<T>::MlDsaFailed
+			);
+			ensure!(auth.len() >= 1312, Error::<T>::MlDsaFailed);
+			let pkd = Self::compute_pk_digest(&auth[..1312]);
+
+			ensure!(
+				T::ProofVerifier::verify_spend_v2(
+					&spend_proof,
+					&inputs.merkle_root,
+					&inputs.nullifier,
+					&pkd,
+					cfg.price,
+					&inputs.change_leaf,
+					&inputs.change_pkd,
+					true,
+				),
+				Error::<T>::ProofVerificationFailed
+			);
+
+			NullifierUsed::<T>::insert(inputs.nullifier, true);
+
+			// Change leaf always inserted (uniform transaction shape).
+			let (_change_leaf_index, _new_root) = Self::v2_insert(inputs.change_leaf)?;
+
+			// Transfer price from pool to app payment account.
+			let payment_dest: T::AccountId =
+				Decode::decode(&mut &cfg.payment_account[..])
+					.map_err(|_| Error::<T>::ProofVerificationFailed)?;
+			let pool = T::PoolAccount::get();
+			let amount: BalanceOf<T> = (cfg.price as u128).unique_saturated_into();
+			T::Currency::transfer(&pool, &payment_dest, amount, ExistenceRequirement::AllowDeath)?;
+
+			// ownership_commitment field carries access_key_commitment
+			let access_key_commitment = inputs.ownership_commitment;
+			let tx_id = inputs.tx_id;
+
+			Self::deposit_event(Event::AccessPurchaseV2Authorized { app_id, tx_id });
+
+			// XCM to AuthGate (para 2003)
+			T::AccessDispatch::send(app_id, inputs.nullifier, tx_id, access_key_commitment);
+
+			Ok(())
+		}
+		///
+		/// SIGNED — the depositor pays `amount` into the pool (the cash-in boundary
+		/// is inherently public, as in Zcash t→z). Reveals ONLY the note leaf:
+		/// no spend_tag, no rp_commitment, no pk digest.
+		///
+		/// `deposit_proof` is a DepositV2Air STARK proving
+		/// leaf = NoteHash(amount, b, pkd) for private (b, pkd) — so the hidden
+		/// note value always equals the paid amount.
+		#[pallet::weight((Weight::zero(), Pays::No))]
+		pub fn deposit_v2(
+			origin: OriginFor<T>,
+			leaf: [u8; 32],
+			amount: u64,
+			deposit_proof: BoundedVec<u8, ConstU32<65536>>,
+			hints_blob: BoundedVec<u8, ConstU32<4096>>,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+			ensure!(
+				T::ProofVerifier::verify_deposit_v2(&deposit_proof, amount, &leaf),
+				Error::<T>::ProofVerificationFailed
+			);
+			let pool = T::PoolAccount::get();
+			let value: BalanceOf<T> = (amount as u128).unique_saturated_into();
+			T::Currency::transfer(&who, &pool, value, ExistenceRequirement::KeepAlive)?;
+			let (leaf_index, new_root) = Self::v2_insert(leaf)?;
+			Self::deposit_event(Event::DepositV2Accepted { leaf, leaf_index, new_root, hints_blob });
+			Ok(())
+		}
+
+		/// Phase 9: purchase an RWA via zk-membership proof — TRUE unlinkability.
+		///
+		/// UNSIGNED. Reveals only: a recent merkle root, the nullifier, the
+		/// ML-DSA-44 pk (fresh per note), and action fields. The spent leaf is
+		/// never named — the SpendAir STARK proves membership in zero knowledge.
+		///
+		/// `auth` = ml_dsa_pk (1312B) ‖ ml_dsa_sig (2420B) over
+		/// BLAKE3("nulla_spend_auth_v2" ‖ public_inputs).
+		#[pallet::weight(Weight::zero())]
+		pub fn purchase_rwa_v2(
+			origin: OriginFor<T>,
+			auth: Vec<u8>,
+			public_inputs: Vec<u8>,
+			spend_proof: Vec<u8>,
+		) -> DispatchResult {
+			ensure_none(origin)?;
+
+			let inputs = SpendPublicV2::decode(&mut &public_inputs[..])
+				.map_err(|_| Error::<T>::ProofVerificationFailed)?;
+
+			ensure!(!NullifierUsed::<T>::get(inputs.nullifier), Error::<T>::NullifierAlreadyUsed);
+			ensure!(Self::v2_root_anchored(&inputs.merkle_root), Error::<T>::RootNotRecent);
+
+			let price = RwaPrices::<T>::get(inputs.rwa_id);
+			ensure!(price > 0, Error::<T>::RwaPriceNotSet);
+
+			// ML-DSA-44 auth binds every public input field.
+			ensure!(
+				T::ProofVerifier::verify_spend_auth_v2(&auth, &public_inputs, false),
+				Error::<T>::MlDsaFailed
+			);
+			// pkd recomputed on-chain from the revealed pk; binds the signing key
+			// to the spent note inside the STARK.
+			ensure!(auth.len() >= 1312, Error::<T>::MlDsaFailed);
+			let pkd = Self::compute_pk_digest(&auth[..1312]);
+
+			ensure!(
+				T::ProofVerifier::verify_spend_v2(
+					&spend_proof,
+					&inputs.merkle_root,
+					&inputs.nullifier,
+					&pkd,
+					price,
+					&inputs.change_leaf,
+					&inputs.change_pkd,
+					true,
+				),
+				Error::<T>::ProofVerificationFailed
+			);
+
+			NullifierUsed::<T>::insert(inputs.nullifier, true);
+
+			// Change leaf is always inserted — zero-value change keeps every
+			// purchase identical in shape (no v == price traffic distinction).
+			let (change_leaf_index, new_root) = Self::v2_insert(inputs.change_leaf)?;
+
+			// Ownership record for later redemption on the RWA chain.
+			OwnershipCommitments::<T>::insert(inputs.tx_id, inputs.ownership_commitment);
+
+			Self::deposit_event(Event::PurchaseV2Authorized {
+				rwa_id: inputs.rwa_id,
+				tx_id: inputs.tx_id,
+				change_leaf: inputs.change_leaf,
+				change_leaf_index,
+				new_root,
+			});
+
+			// XCM to the RWA chain. The spend_tag slot carries the nullifier
+			// (already public) as the purchase record key.
+			T::RwaDispatch::send(
+				inputs.rwa_id,
+				inputs.nullifier,
+				inputs.nullifier,
+				price,
+				inputs.tx_id,
+				inputs.ownership_commitment,
+			);
+
+			Ok(())
+		}
+
+		/// Phase 9: withdraw a v2 note back to public balance via zk-membership proof.
+		///
+		/// UNSIGNED. The STARK enforces v == amount exactly (no change output).
+		/// `auth` = ml_dsa_pk ‖ sig over BLAKE3("nulla_withdraw_auth_v2" ‖ public_inputs).
+		#[pallet::weight(Weight::zero())]
+		pub fn withdraw_v2(
+			origin: OriginFor<T>,
+			auth: Vec<u8>,
+			public_inputs: Vec<u8>,
+			spend_proof: Vec<u8>,
+		) -> DispatchResult {
+			ensure_none(origin)?;
+
+			let inputs = WithdrawPublicV2::decode(&mut &public_inputs[..])
+				.map_err(|_| Error::<T>::ProofVerificationFailed)?;
+
+			ensure!(!NullifierUsed::<T>::get(inputs.nullifier), Error::<T>::NullifierAlreadyUsed);
+			ensure!(Self::v2_root_anchored(&inputs.merkle_root), Error::<T>::RootNotRecent);
+
+			ensure!(
+				T::ProofVerifier::verify_spend_auth_v2(&auth, &public_inputs, true),
+				Error::<T>::MlDsaFailed
+			);
+			ensure!(auth.len() >= 1312, Error::<T>::MlDsaFailed);
+			let pkd = Self::compute_pk_digest(&auth[..1312]);
+
+			let zero_change = T::ProofVerifier::v2_zero_change_leaf();
+			ensure!(
+				T::ProofVerifier::verify_spend_v2(
+					&spend_proof,
+					&inputs.merkle_root,
+					&inputs.nullifier,
+					&pkd,
+					inputs.amount,
+					&zero_change,
+					&[0u8; 32],
+					false,
+				),
+				Error::<T>::ProofVerificationFailed
+			);
+
+			NullifierUsed::<T>::insert(inputs.nullifier, true);
+
+			let dest: T::AccountId = Decode::decode(&mut &inputs.destination[..])
+				.map_err(|_| Error::<T>::ProofVerificationFailed)?;
+			let pool = T::PoolAccount::get();
+			let value: BalanceOf<T> = (inputs.amount as u128).unique_saturated_into();
+			T::Currency::transfer(&pool, &dest, value, ExistenceRequirement::AllowDeath)?;
+
+			Self::deposit_event(Event::WithdrawV2Completed { tx_id: inputs.tx_id });
 			Ok(())
 		}
 	}

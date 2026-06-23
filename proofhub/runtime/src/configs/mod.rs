@@ -356,16 +356,62 @@ impl pallet_proofs::Config for Runtime {
 	// REMOVED: GenesisCommitments - faucet logic deprecated
 	type PoolAccount = PrivacyPoolAccount;
 	type RwaDispatch = RwaXcmDispatch;
+	type AccessDispatch = AccessGateXcmDispatch;
 }
 
 // Runtime proof verifier wired to the local `verifier` crate.
 pub struct RuntimeProofVerifier;
 impl pallet_proofs::ProofVerify for RuntimeProofVerifier {
-	fn pedersen_check_u64(value: u64, blinding: [u8; 32], commitment: [u8; 32]) -> bool {
-		verifier::pedersen_check_u64(value, blinding, commitment)
+	fn verify_commitment(value: u64, blinding: [u8; 32], commitment: [u8; 32]) -> bool {
+		verifier::verify_commitment(value, blinding, commitment)
 	}
 	fn verify_purchase(proof: &[u8], public_inputs: &[u8]) -> bool {
 		verifier::verify_purchase(proof, public_inputs)
+	}
+	fn verify_withdrawal(proof: &[u8], public_inputs: &[u8]) -> bool {
+		verifier::verify_withdrawal(proof, public_inputs)
+	}
+	fn verify_range_proof(range_proof: &[u8], rp_commitment: &[u8; 32]) -> bool {
+		verifier::verify_range_proof(range_proof, rp_commitment)
+	}
+	fn verify_purchase_proof(proof: &[u8], rp_commitment: &[u8; 32], change_rp_commitment: &[u8; 32], price: u64) -> bool {
+		verifier::verify_purchase_proof(proof, rp_commitment, change_rp_commitment, price)
+	}
+
+	// --- Phase 9 (v2 zk-membership) ---
+
+	fn verify_deposit_v2(proof: &[u8], amount: u64, leaf: &[u8; 32]) -> bool {
+		verifier::deposit_v2::verify_deposit_v2(proof, amount, leaf)
+	}
+	fn verify_spend_v2(
+		proof: &[u8],
+		root: &[u8; 32],
+		nullifier: &[u8; 32],
+		pkd: &[u8; 32],
+		price_or_amount: u64,
+		change_leaf: &[u8; 32],
+		change_pkd: &[u8; 32],
+		purchase_mode: bool,
+	) -> bool {
+		verifier::spend_v2::verify_spend_v2(
+			proof, root, nullifier, pkd, price_or_amount, change_leaf, change_pkd, purchase_mode,
+		)
+	}
+	fn verify_spend_auth_v2(auth: &[u8], public_inputs: &[u8], withdraw: bool) -> bool {
+		verifier::verify_spend_auth_v2(auth, public_inputs, withdraw)
+	}
+	fn v2_insert_leaf(
+		nodes: [[u8; 32]; 20],
+		leaf_count: u32,
+		leaf: [u8; 32],
+	) -> Option<([[u8; 32]; 20], u32, [u8; 32])> {
+		let mut frontier = verifier::v2::Frontier { nodes, leaf_count };
+		frontier.insert(leaf).ok()?;
+		let root = frontier.root();
+		Some((frontier.nodes, frontier.leaf_count, root))
+	}
+	fn v2_zero_change_leaf() -> [u8; 32] {
+		verifier::spend_v2::zero_change_leaf()
 	}
 }
 
@@ -398,7 +444,6 @@ pub struct RwaXcmDispatch;
 impl pallet_proofs::RwaPurchaseDispatch for RwaXcmDispatch {
 	fn send(
 		rwa_id: [u8; 32],
-		destination: alloc::vec::Vec<u8>,
 		nullifier: [u8; 32],
 		spend_tag: [u8; 32],
 		_note_value: u64,
@@ -411,19 +456,15 @@ impl pallet_proofs::RwaPurchaseDispatch for RwaXcmDispatch {
 		// asset_id: first 4 bytes of rwa_id (LE u32).
 		let asset_id = u32::from_le_bytes([rwa_id[0], rwa_id[1], rwa_id[2], rwa_id[3]]);
 
-		// buyer: 32-byte AccountId from destination (zero-padded if shorter).
-		let mut buyer = [0u8; 32];
-		let len = destination.len().min(32);
-		buyer[..len].copy_from_slice(&destination[..len]);
-
 		// Encode call: [pallet_index=51][call_index=4][args SCALE]
 		// Matches RWA runtime: pallet_index(51) = RwaMarketplace, call_index(4) = xcm_record_purchase
-		// Phase 6: 3rd arg is now spend_tag (was commitment) — same [u8;32] type, same encoding
+		// buyer/destination is intentionally NOT encoded — it must not travel in the
+		// XCM message or it would reveal the buyer's AccountId on the RWA chain.
+		// Ownership is claimed via ownership_commitment blinding at redemption time.
 		let mut call_data = alloc::vec::Vec::new();
 		call_data.push(51u8); // RwaMarketplace pallet index
 		call_data.push(4u8);  // xcm_record_purchase call index
 		asset_id.encode_to(&mut call_data);
-		buyer.encode_to(&mut call_data);
 		spend_tag.encode_to(&mut call_data);
 		nullifier.encode_to(&mut call_data);
 		tx_id.encode_to(&mut call_data);
@@ -449,6 +490,103 @@ impl pallet_proofs::RwaPurchaseDispatch for RwaXcmDispatch {
 			}
 			Err(e) => {
 				log::debug!(target: "proofhub::xcm", "RWA purchase XCM validate failed: {:?}", e);
+			}
+		}
+	}
+
+	/// Send XCM to RWA chain to transfer an ownership record from old_tx_id to new_tx_id.
+	/// Called by `relist_private` after verifying the reseller's ownership proof.
+	///
+	/// Encodes: pallet_index=51, call_index=5 (xcm_transfer_ownership)
+	fn send_transfer(
+		old_tx_id: [u8; 16],
+		new_ownership_commitment: [u8; 32],
+		new_tx_id: [u8; 16],
+	) {
+		use codec::Encode;
+		use xcm::latest::prelude::*;
+
+		// Encode call: [pallet_index=51][call_index=6][args SCALE]
+		let mut call_data = alloc::vec::Vec::new();
+		call_data.push(51u8); // RwaMarketplace pallet index
+		call_data.push(6u8);  // xcm_transfer_ownership call index
+		old_tx_id.encode_to(&mut call_data);
+		new_ownership_commitment.encode_to(&mut call_data);
+		new_tx_id.encode_to(&mut call_data);
+
+		let dest: Location = Location::new(1, Junctions::from([Junction::Parachain(2001)]));
+		let xcm_msg: xcm::latest::Xcm<()> = Xcm::<()>(alloc::vec![
+			Instruction::<()>::UnpaidExecution { weight_limit: WeightLimit::Unlimited, check_origin: None },
+			Instruction::<()>::Transact {
+				origin_kind: OriginKind::SovereignAccount,
+				fallback_max_weight: Some(Weight::from_parts(500_000_000, 64 * 1024)),
+				call: call_data.into(),
+			},
+		]);
+
+		let mut dest_opt = Some(dest);
+		let mut msg_opt = Some(xcm_msg);
+		match xcm_config::XcmRouter::validate(&mut dest_opt, &mut msg_opt) {
+			Ok((ticket, _)) => {
+				if let Err(e) = xcm_config::XcmRouter::deliver(ticket) {
+					log::debug!(target: "proofhub::xcm", "RWA transfer XCM deliver failed: {:?}", e);
+				}
+			}
+			Err(e) => {
+				log::debug!(target: "proofhub::xcm", "RWA transfer XCM validate failed: {:?}", e);
+			}
+		}
+	}
+}
+
+/// XCM dispatcher: sends a `Transact` to the AuthGate parachain (para 2003) so that
+/// `pallet_access_keys::xcm_record_access_grant` is executed there.
+///
+/// The origin arriving at AuthGate is the DistProofHub sovereign account (Sibling(2000)),
+/// which is in the AuthGate allowed-sovereign list alongside ScanProofHub (Sibling(2002)).
+///
+/// Silently swallows delivery errors — `purchase_access` must not fail due to XCM issues.
+pub struct AccessGateXcmDispatch;
+impl pallet_proofs::AccessKeyDispatch for AccessGateXcmDispatch {
+	fn send(
+		app_id: [u8; 32],
+		nullifier: [u8; 32],
+		tx_id: [u8; 16],
+		access_key_commitment: [u8; 32],
+	) {
+		use codec::Encode;
+		use xcm::latest::prelude::*;
+
+		// Encode call: [pallet_index=50][call_index=2][args SCALE]
+		// Matches AuthGate runtime: pallet_index(50) = AccessKeys, call_index(2) = xcm_record_access_grant
+		let mut call_data = alloc::vec::Vec::new();
+		call_data.push(50u8); // AccessKeys pallet index
+		call_data.push(2u8);  // xcm_record_access_grant call index
+		app_id.encode_to(&mut call_data);
+		nullifier.encode_to(&mut call_data);
+		tx_id.encode_to(&mut call_data);
+		access_key_commitment.encode_to(&mut call_data);
+
+		let dest: Location = Location::new(1, Junctions::from([Junction::Parachain(2003)]));
+		let xcm_msg: xcm::latest::Xcm<()> = Xcm::<()>(alloc::vec![
+			Instruction::<()>::UnpaidExecution { weight_limit: WeightLimit::Unlimited, check_origin: None },
+			Instruction::<()>::Transact {
+				origin_kind: OriginKind::SovereignAccount,
+				fallback_max_weight: Some(Weight::from_parts(500_000_000, 64 * 1024)),
+				call: call_data.into(),
+			},
+		]);
+
+		let mut dest_opt = Some(dest);
+		let mut msg_opt = Some(xcm_msg);
+		match xcm_config::XcmRouter::validate(&mut dest_opt, &mut msg_opt) {
+			Ok((ticket, _)) => {
+				if let Err(e) = xcm_config::XcmRouter::deliver(ticket) {
+					log::debug!(target: "proofhub::xcm", "AuthGate XCM deliver failed: {:?}", e);
+				}
+			}
+			Err(e) => {
+				log::debug!(target: "proofhub::xcm", "AuthGate XCM validate failed: {:?}", e);
 			}
 		}
 	}

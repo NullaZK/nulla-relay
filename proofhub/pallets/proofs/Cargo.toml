@@ -1,8 +1,8 @@
 [package]
 name = "pallet-proofhub-proofs"
 version = "1.0.0"
-edition = "2021"
-description = "Minimal proofs pallet for Proof Hub: store commitments, submit and verify proofs."
+edition = "2026"
+description = "ProofHub proofs pallet (Phase 9): on-chain STARK-membership + ML-DSA-44 verification for the quantum-resistant private lane (deposit_v2 / withdraw_v2 / purchase_rwa_v2 / purchase_access_v2); legacy v1 calls disabled at runtime."
 license = "Unlicense"
 publish = false
 
@@ -13,6 +13,7 @@ sp-std = { workspace = true, default-features = false }
 sp-core = { workspace = true, default-features = false }
 sp-runtime = { workspace = true, default-features = false }
 sp-io = { workspace = true, default-features = false }
+blake3 = { version = "1", default-features = false }
 frame-support = { workspace = true, default-features = false }
 frame-system = { workspace = true, default-features = false }
 
@@ -25,6 +26,7 @@ std = [
 	"sp-core/std",
 	"frame-support/std",
 	"frame-system/std",
+	"blake3/std",
 ]
 runtime-benchmarks = []
 try-runtime = []

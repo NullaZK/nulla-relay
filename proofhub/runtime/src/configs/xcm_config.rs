@@ -10,7 +10,7 @@ use polkadot_sdk::{
 
 use frame_support::{
 	parameter_types,
-	traits::{ConstU32, Contains, Everything, Nothing},
+	traits::{ConstU32, Contains, ContainsPair, Everything, Nothing},
 	weights::Weight,
 };
 use frame_system::EnsureRoot;
@@ -19,26 +19,44 @@ use polkadot_parachain_primitives::primitives::Sibling;
 use polkadot_runtime_common::impls::ToAuthor;
 use polkadot_sdk::{
 	polkadot_sdk_frame::traits::Disabled,
-	staging_xcm_builder::{DenyRecursively, DenyThenTry},
 };
 use xcm::latest::prelude::*;
 use xcm_builder::{
 	AccountId32Aliases, AllowExplicitUnpaidExecutionFrom, AllowTopLevelPaidExecutionFrom,
-	DenyReserveTransferToRelayChain, EnsureXcmOrigin, FixedWeightBounds,
-	FrameTransactionalProcessor, FungibleAdapter, IsConcrete, NativeAsset, ParentIsPreset,
-	RelayChainAsNative, SiblingParachainAsNative, SiblingParachainConvertsVia,
-	SignedAccountId32AsNative, SignedToAccountId32, SovereignSignedViaLocation, TakeWeightCredit,
-	TrailingSetTopicAsId, UsingComponents, WithComputedOrigin, WithUniqueTopic,
+	EnsureXcmOrigin, FixedWeightBounds, FrameTransactionalProcessor, FungibleAdapter, IsConcrete,
+	NativeAsset, ParentIsPreset, RelayChainAsNative, SiblingParachainAsNative,
+	SiblingParachainConvertsVia, SignedAccountId32AsNative, SignedToAccountId32,
+	SovereignSignedViaLocation, TakeWeightCredit, TrailingSetTopicAsId, UsingComponents,
+	WithComputedOrigin, WithUniqueTopic,
 };
 use xcm_executor::XcmExecutor;
 
 parameter_types! {
 	pub const RelayLocation: Location = Location::parent();
-	pub const RelayNetwork: Option<NetworkId> = None;
+	// Relay-native token seen from the parachain side: asset id is {parents:1, interior:Here}
+	// and the reserve (origin) is the relay chain {parents:1}.
+	// Used by IsReserve so ReserveAssetDeposited messages from the relay are accepted.
+	pub RelayNativeToken: xcm::latest::Asset = xcm::latest::Asset {
+		id: xcm::latest::AssetId(xcm::latest::Location::new(1, xcm::latest::Junctions::Here)),
+		fun: xcm::latest::Fungibility::Fungible(u128::MAX),
+	};
+	pub RelayChainLocation: xcm::latest::Location = xcm::latest::Location::parent();
+	pub RelayNativeAssetFilter: (xcm::latest::AssetFilter, xcm::latest::Location) = (
+		xcm::latest::AssetFilter::Wild(xcm::latest::WildAsset::AllOf {
+			id: xcm::latest::AssetId(xcm::latest::Location::new(1, xcm::latest::Junctions::Here)),
+			fun: xcm::latest::WildFungibility::Fungible,
+		}),
+		xcm::latest::Location::parent(),
+	);
+
+	pub const RelayNetwork: Option<NetworkId> = Some(NetworkId::ByGenesis(xcm::latest::WESTEND_GENESIS_HASH));
 	pub RelayChainOrigin: RuntimeOrigin = cumulus_pallet_xcm::Origin::Relay.into();
-	// For the real deployment, it is recommended to set `RelayNetwork` according to the relay chain
-	// and prepend `UniversalLocation` with `GlobalConsensus(RelayNetwork::get())`.
-	pub UniversalLocation: InteriorLocation = Parachain(ParachainInfo::parachain_id().into()).into();
+	// UniversalLocation must include GlobalConsensus to match the relay's UniversalLocation
+	// so that asset reanchoring during BuyExecution produces the correct asset id.
+	pub UniversalLocation: InteriorLocation = [
+		GlobalConsensus(RelayNetwork::get().unwrap()),
+		Parachain(ParachainInfo::parachain_id().into()),
+	].into();
 }
 
 /// Type for specifying how a `Location` can be converted into an `AccountId`. This is used
@@ -103,22 +121,35 @@ impl Contains<Location> for ParentOrParentsExecutivePlurality {
 }
 
 pub type Barrier = TrailingSetTopicAsId<
-	DenyThenTry<
-		DenyRecursively<DenyReserveTransferToRelayChain>,
-		(
-			TakeWeightCredit,
-			WithComputedOrigin<
-				(
-					AllowTopLevelPaidExecutionFrom<Everything>,
-					AllowExplicitUnpaidExecutionFrom<ParentOrParentsExecutivePlurality>,
-					// ^^^ Parent and its exec plurality get free execution
-				),
-				UniversalLocation,
-				ConstU32<8>,
-			>,
-		),
-	>,
+	(
+		TakeWeightCredit,
+		WithComputedOrigin<
+			(
+				AllowTopLevelPaidExecutionFrom<Everything>,
+				AllowExplicitUnpaidExecutionFrom<ParentOrParentsExecutivePlurality>,
+				// ^^^ Parent and its exec plurality get free execution
+			),
+			UniversalLocation,
+			ConstU32<8>,
+		>,
+	),
 >;
+
+/// Accept any fungible asset whose id is the relay-chain native token ({parents:1, Here}),
+/// when the origin of the ReserveAssetDeposited message is the relay chain ({parents:1, Here}).
+/// This is the direct implementation of the IsReserve check for relay-native token on DMP.
+pub struct AllRelayNativeFromParent;
+impl ContainsPair<xcm::latest::Asset, xcm::latest::Location> for AllRelayNativeFromParent {
+	fn contains(asset: &xcm::latest::Asset, origin: &xcm::latest::Location) -> bool {
+		let relay = xcm::latest::Location::parent(); // {parents:1, interior:Here}
+		*origin == relay &&
+			matches!(
+				&asset.id,
+				xcm::latest::AssetId(id) if *id == relay
+			) &&
+			matches!(asset.fun, xcm::latest::Fungibility::Fungible(_))
+	}
+}
 
 pub struct XcmConfig;
 impl xcm_executor::Config for XcmConfig {
@@ -128,7 +159,10 @@ impl xcm_executor::Config for XcmConfig {
 	// How to withdraw and deposit an asset.
 	type AssetTransactor = LocalAssetTransactor;
 	type OriginConverter = XcmOriginToTransactDispatchOrigin;
-	type IsReserve = NativeAsset;
+	// Fix: Accept relay-native token ({parents:1, Here}) from relay origin ({parents:1}).
+	// NativeAsset rejects it because asset.id != origin (different representations).
+	// AllRelayNativeFromParent explicitly checks both conditions directly.
+	type IsReserve = (NativeAsset, AllRelayNativeFromParent);
 	type IsTeleporter = (); // Teleporting is disabled.
 	type UniversalLocation = UniversalLocation;
 	type Barrier = Barrier;
@@ -179,7 +213,7 @@ impl pallet_xcm::Config for Runtime {
 	// Needs to be `Everything` for local testing.
 	type XcmExecutor = XcmExecutor<XcmConfig>;
 	type XcmTeleportFilter = Everything;
-	type XcmReserveTransferFilter = Nothing;
+	type XcmReserveTransferFilter = Everything;
 	type Weigher = FixedWeightBounds<UnitWeightCost, RuntimeCall, MaxInstructions>;
 	type UniversalLocation = UniversalLocation;
 	type RuntimeOrigin = RuntimeOrigin;
