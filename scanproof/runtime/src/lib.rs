@@ -164,10 +164,10 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
 	spec_name: alloc::borrow::Cow::Borrowed("proofhub-runtime"),
 	impl_name: alloc::borrow::Cow::Borrowed("proofhub-runtime"),
 	authoring_version: 1,
-	spec_version: 9,
+	spec_version: 14, // Phase 10: Lelantus one-of-many coins (deposit_coin/purchase_coin/withdraw_coin); fee fields dropped from verifier wire format
 	impl_version: 0,
 	apis: apis::RUNTIME_API_VERSIONS,
-	transaction_version: 2,
+	transaction_version: 3,
 	system_version: 1,
 };
 

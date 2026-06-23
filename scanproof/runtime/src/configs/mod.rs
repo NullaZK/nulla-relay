@@ -353,15 +353,12 @@ impl pallet_proofs::Config for Runtime {
 	type RuntimeEvent = RuntimeEvent;
 	type ProofVerifier = RuntimeProofVerifier;
 	type Currency = Balances;
-	type BaseFee = PrivateBaseFee;
-	type FeePayer = PaymasterFeePayer;
-	type FindAuthor = pallet_session::FindAccountFromAuthorIndex<Self, Aura>;
 	type MaxProofSize = sp_core::ConstU32<{ 64 * 1024 }>;
 	type MaxRangeProofSize = sp_core::ConstU32<{ 16 * 1024 }>;
 	type MaxOutputs = sp_core::ConstU32<2>;
-	type GenesisCommitments = GenesisCommitments;
 	type PoolAccount = PrivacyPoolAccount;
 	type RwaDispatch = RwaXcmDispatch;
+	type AccessDispatch = AccessGateXcmDispatch;
 }
 
 // Runtime proof verifier wired to the local `verifier` crate.
@@ -392,18 +389,32 @@ impl pallet_proofs::ProofVerify for RuntimeProofVerifier {
 	fn pedersen_subtract(c_a: &[u8; 32], c_b: &[u8; 32]) -> Option<[u8; 32]> {
 		verifier::pedersen_subtract(c_a, c_b)
 	}
+
+	// --- Phase 10 (Lelantus one-of-many) ---
+
+	fn verify_one_of_many(
+		proof: &[u8],
+		coins: &[[u8; 32]],
+		serial: &[u8; 32],
+		price: u64,
+		change: &[u8; 32],
+		context: &[u8],
+	) -> bool {
+		verifier::one_of_many::verify(proof, coins, serial, price, change, context)
+	}
+	fn verify_deposit_open(coin: &[u8; 32], amount: u64, proof: &[u8], context: &[u8]) -> bool {
+		verifier::one_of_many::verify_deposit_open(coin, amount, proof, context)
+	}
+	fn verify_g1_pok(new_coin: &[u8; 32], change: &[u8; 32], proof: &[u8], context: &[u8]) -> bool {
+		verifier::one_of_many::verify_g1_pok(new_coin, change, proof, context)
+	}
+	fn pad_group(coins: &[[u8; 32]], group_id: u32) -> alloc::vec::Vec<[u8; 32]> {
+		verifier::one_of_many::pad_group(coins, group_id)
+	}
 }
 
 parameter_types! {
-	pub const PrivateBaseFee: Balance = MICRO_UNIT;
-	pub const PaymasterPalletId: PalletId = PalletId(*b"nll/pay0");
 	pub const PoolPalletId: PalletId = PalletId(*b"nll/pool");
-	pub GenesisCommitments: &'static [[u8; 32]] = &[];
-}
-
-pub struct PaymasterFeePayer;
-impl frame_support::traits::Get<AccountId> for PaymasterFeePayer {
-	fn get() -> AccountId { PaymasterPalletId::get().into_account_truncating() }
 }
 
 pub struct PrivacyPoolAccount;
@@ -469,6 +480,62 @@ impl pallet_proofs::RwaPurchaseDispatch for RwaXcmDispatch {
 			}
 			Err(e) => {
 				log::debug!(target: "proofhub_pedersen::xcm", "RWA purchase XCM validate failed: {:?}", e);
+			}
+		}
+	}
+}
+
+/// XCM dispatcher: sends a `Transact` to the AuthGate parachain (para 2003) so that
+/// `pallet_access_keys::xcm_record_access_grant` is executed there.
+///
+/// The origin arriving at AuthGate is the ScanProofHub sovereign account (Sibling(2002)),
+/// which is in the AuthGate allowed-sovereign list.
+///
+/// Silently swallows XCM delivery errors — `purchase_access` must not fail due to XCM issues.
+pub struct AccessGateXcmDispatch;
+impl pallet_proofs::AccessKeyDispatch for AccessGateXcmDispatch {
+	fn send(
+		app_id: [u8; 32],
+		nullifier: [u8; 32],
+		tx_id: [u8; 16],
+		access_key_commitment: [u8; 32],
+	) {
+		use codec::Encode;
+		use xcm::latest::prelude::*;
+
+		// Encode call: [pallet_index=50][call_index=2][args SCALE]
+		// Matches AuthGate runtime: pallet_index(50) = AccessKeys, call_index(2) = xcm_record_access_grant
+		let mut call_data = alloc::vec::Vec::new();
+		call_data.push(50u8); // AccessKeys pallet index
+		call_data.push(2u8);  // xcm_record_access_grant call index
+		app_id.encode_to(&mut call_data);
+		nullifier.encode_to(&mut call_data);
+		tx_id.encode_to(&mut call_data);
+		access_key_commitment.encode_to(&mut call_data);
+
+		let dest: Location = Location::new(1, Junctions::from([Junction::Parachain(2003)]));
+		let xcm_msg: xcm::latest::Xcm<()> = Xcm::<()>(alloc::vec![
+			Instruction::<()>::UnpaidExecution {
+				weight_limit: WeightLimit::Unlimited,
+				check_origin: None,
+			},
+			Instruction::<()>::Transact {
+				origin_kind: OriginKind::SovereignAccount,
+				fallback_max_weight: Some(Weight::from_parts(500_000_000, 64 * 1024)),
+				call: call_data.into(),
+			},
+		]);
+
+		let mut dest_opt = Some(dest);
+		let mut msg_opt = Some(xcm_msg);
+		match xcm_config::XcmRouter::validate(&mut dest_opt, &mut msg_opt) {
+			Ok((ticket, _)) => {
+				if let Err(e) = xcm_config::XcmRouter::deliver(ticket) {
+					log::debug!(target: "proofhub_pedersen::xcm", "AccessGate XCM deliver failed: {:?}", e);
+				}
+			}
+			Err(e) => {
+				log::debug!(target: "proofhub_pedersen::xcm", "AccessGate XCM validate failed: {:?}", e);
 			}
 		}
 	}
